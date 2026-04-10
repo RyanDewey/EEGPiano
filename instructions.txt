@@ -1,0 +1,251 @@
+SSVEP Piano – EEG Data Collection System
+Instructions for Use
+=========================================================
+
+OVERVIEW
+--------
+This system combines two components:
+
+  1. unicornlsl.py     — streams 16-channel EEG/IMU data from a gTec Unicorn
+                         Hybrid Black headset to LSL at 250 Hz.
+
+  2. ssvep_stimulus.py — displays six phase-reversing checkerboard stimuli at
+                         4, 6, 8, 10, 12, and 15 Hz on a piano-keyboard
+                         background.  Each stimulus cycle onset is sent as an
+                         event marker to a second LSL stream ("SSVEPMarkers").
+
+Both streams are time-locked through LSL's shared clock, so post-processing
+can epoch EEG data relative to exact stimulus onset markers.
+
+                   ┌──────────────────────────────────────────────┐
+                   │          SSVEP Piano – Screen Layout          │
+                   │                                               │
+                   │  [status bar: state / target / key hints]     │
+                   │                                               │
+                   │   [4Hz]  [6Hz]  [8Hz] [10Hz] [12Hz] [15Hz]   │
+                   │   ┌───┐  ┌───┐  ┌───┐  ┌───┐  ┌───┐  ┌───┐  │
+                   │   │ ░█ │  │ █░ │  │ ░█ │  │ █░ │  │ ░█ │  │ █░ │  │
+                   │   │ █░ │  │ ░█ │  │ █░ │  │ ░█ │  │ █░ │  │ ░█ │  │
+                   │   └───┘  └───┘  └───┘  └───┘  └───┘  └───┘  │
+                   │    C3     E3     G3     C4     E4     G4      │
+                   │     │      │      │      │      │      │      │
+                   │  ╔══╧══════╧══════╧══════╧══════╧══════╧═══╗  │
+                   │  ║     Piano keyboard (C2 – B5)            ║  │
+                   │  ╚══════════════════════════════════════════╝  │
+                   └──────────────────────────────────────────────┘
+
+HARDWARE REQUIREMENTS
+---------------------
+  • gTec Unicorn Hybrid Black EEG headset
+  • Computer running macOS (tested), Windows, or Linux
+  • Monitor refresh rate ≥ 60 Hz  (≥ 120 Hz recommended for cleanest flicker)
+  • Bluetooth or USB connection to the headset
+
+RECOMMENDED VIEWING CONDITIONS
+-------------------------------
+  • Viewing distance:   60–80 cm from the monitor screen
+  • Room lighting:      dim the room to reduce ambient reflections
+  • Eye level:          screen centre should be near eye level
+  • Fixation:           stare directly at the target stimulus without blinking
+  • Photosensitivity:   individuals with photosensitive epilepsy MUST NOT use
+                        this system — the stimuli produce rapid luminance flicker
+
+
+SOFTWARE SETUP
+--------------
+1.  Create a Python 3.8+ virtual environment:
+
+        python3 -m venv venv
+
+2.  Activate the environment:
+
+        macOS / Linux:   source venv/bin/activate
+        Windows:         venv\Scripts\activate
+
+3.  Install all dependencies:
+
+        pip install -r requirements.txt
+
+4.  (Optional) Install LabRecorder to save .xdf files:
+        https://github.com/labstreaminglayer/App-LabRecorder/releases
+
+
+CONFIGURING THE DEVICE PATH
+----------------------------
+Open unicornlsl.py and update the device path on line ~26:
+
+    device = '/dev/cu.UN-XXXXXXXX'   ← macOS Bluetooth serial port
+
+To find the correct path:
+    macOS:    ls /dev/cu.UN-*
+    Windows:  check Device Manager → Ports (COM & LPT)
+    Linux:    ls /dev/rfcomm*
+
+
+RUNNING THE SYSTEM
+------------------
+Step 1 – EEG stream   (Terminal A):
+    python unicornlsl.py
+
+    You should see:
+        connected to serial port /dev/cu.UN-...
+        started LSL stream: name=Unicorn, type=EEG, id=...
+        started Unicorn
+
+Step 2 – Stimulus display   (Terminal B):
+    python ssvep_stimulus.py
+
+    You should see:
+        [LSL] Marker outlet "SSVEPMarkers" ready.
+
+Step 3 – Recording (LabRecorder):
+    • Launch LabRecorder
+    • Click "Refresh" – both "Unicorn" and "SSVEPMarkers" should appear
+    • Tick both streams
+    • Set a filename and click "Start"
+
+Step 4 – Data collection:
+    • In the stimulus window, press SPACE to start flickering
+    • Press 1–6 to indicate which stimulus the participant should attend to
+    • Collect one block (~30–60 seconds) per target frequency
+    • Press SPACE to pause between blocks
+    • When finished, press ESC to quit
+
+Step 5 – Save data:
+    • Click "Stop" in LabRecorder; data is saved to the .xdf file
+
+
+KEYBOARD CONTROLS (stimulus window)
+------------------------------------
+  Key       Action
+  ───────── ───────────────────────────────────────────────────────────────────
+  SPACE     Start / stop stimulus presentation
+              Sends LSL marker 252 on start, 253 on stop.
+
+  1         Cue target:  4 Hz  (C3)     → marker 104
+  2         Cue target:  6 Hz  (E3)     → marker 106
+  3         Cue target:  8 Hz  (G3)     → marker 108
+  4         Cue target: 10 Hz  (C4)     → marker 110
+  5         Cue target: 12 Hz  (E4)     → marker 112
+  6         Cue target: 15 Hz  (G4)     → marker 115
+
+              The cued stimulus gets a thicker coloured border and a
+              "▼ TARGET ▼" label.  Press the same key again to deselect.
+
+  ESC / Q   Quit the program
+
+
+LSL MARKER ENCODING
+-------------------
+  Value   Meaning
+  ──────  ──────────────────────────────────────────────────────────
+    4     Stimulus cycle onset –  4 Hz  (C3)
+    6     Stimulus cycle onset –  6 Hz  (E3)
+    8     Stimulus cycle onset –  8 Hz  (G3)
+   10     Stimulus cycle onset – 10 Hz  (C4)
+   12     Stimulus cycle onset – 12 Hz  (E4)
+   15     Stimulus cycle onset – 15 Hz  (G4)
+  104     Target cue:  attend to  4 Hz
+  106     Target cue:  attend to  6 Hz
+  108     Target cue:  attend to  8 Hz
+  110     Target cue:  attend to 10 Hz
+  112     Target cue:  attend to 12 Hz
+  115     Target cue:  attend to 15 Hz
+  252     Experiment start (SPACE pressed)
+  253     Experiment stop  (SPACE pressed again)
+
+
+SSVEP DESIGN RATIONALE
+-----------------------
+Stimulus type:
+  Phase-reversing black-and-white checkerboards are used rather than simple
+  on/off flicker because pattern reversal elicits a stronger and more
+  frequency-specific visual evoked response.  The checkerboard squares are
+  15 × 15 px, which at typical viewing distances fall in the range known to
+  maximise SSVEP amplitude (spatial frequency ~2–6 cpd).
+
+Stimulus size:
+  Each stimulus is 180 × 180 px.  At 60 cm viewing distance and a 24-inch
+  1440 × 900 display this subtends approximately 3–4° of visual angle,
+  sufficient for robust foveal/near-foveal SSVEPs.
+
+Contrast:
+  Pure black (0, 0, 0) and white (255, 255, 255) maximise Michelson contrast
+  (100 %), which correlates with SSVEP amplitude.
+
+Frequency selection:
+  4, 6, 8, 10, 12, 15 Hz were chosen because:
+    • They span a range with high cortical sensitivity (alpha / low beta band)
+    • No frequency is an integer multiple of another within the set
+      (minimises harmonic cross-talk between channels)
+    • All divide into 60 Hz monitor refresh or have small aliasing error
+
+Spatial layout:
+  Stimuli are spread across the horizontal visual field, each above its
+  corresponding piano key.  Separation ≥ 5° ensures independent spatial
+  attention can be directed to each target.
+
+Coloured borders:
+  Each stimulus has a unique accent colour for quick identification without
+  requiring the participant to read text labels during a trial.
+
+Marker timing:
+  A marker is sent once per stimulus cycle (at the phase 1 → 0 transition).
+  Frequency F produces F markers/second.  Total marker rate ≈ 55 events/sec.
+  Timing accuracy is limited by the monitor refresh period (~17 ms at 60 Hz).
+  For sub-millisecond latency, use a photodiode on the screen corner connected
+  to an auxiliary amplifier channel.
+
+
+RECOMMENDED EXPERIMENTAL PROTOCOL
+-----------------------------------
+  Block structure (repeat for each of the 6 frequencies):
+    1. Instruct participant: "Please stare at the [colour/frequency] square."
+    2. Press the corresponding number key (1–6) to send the target-cue marker.
+    3. Press SPACE to start stimulation.
+    4. Record for 30–60 seconds.
+    5. Press SPACE to stop; allow 10-second rest.
+
+  Randomise block order across participants to counterbalance fatigue.
+  Collect ≥ 3 repetitions per frequency for averaged analysis.
+
+
+TROUBLESHOOTING
+---------------
+  "No module named pygame"
+      → pip install pygame>=2.0.0
+
+  "cannot connect to serial port"
+      → Check that the Unicorn is powered on and paired via Bluetooth.
+        Verify the device path in unicornlsl.py (variable `device`, line ~26).
+
+  Streams not visible in LabRecorder
+      → Firewall may be blocking LSL multicast (UDP 16571, 16572).
+        Try running both scripts on the same machine first.
+
+  Stimuli appear to stutter or skip
+      → Close browser tabs, video players, and other GPU-heavy applications.
+        On macOS, disable Notification Centre pop-ups during recording.
+
+  Marker stream but no EEG stream
+      → unicornlsl.py must be running in a separate terminal before
+        opening LabRecorder.
+
+  Very noisy EEG
+      → Check electrode impedance (< 10 kΩ recommended); re-wet gel if needed.
+        Ensure participant sits still and minimises jaw/neck muscle activity.
+
+
+NOTE ON MONITOR REFRESH RATE AND TIMING
+-----------------------------------------
+The stimulus frequency is computed via time.perf_counter(), so the phase logic
+runs accurately regardless of display refresh rate.  However, the actual photons
+emitted by the screen are quantised to the monitor's refresh interval.
+
+  At 60 Hz (16.7 ms frame):   4, 6, 10, 15 Hz are close to exact sub-multiples;
+                               8 and 12 Hz have ±4 ms of aliasing error.
+  At 120 Hz (8.3 ms frame):   all six frequencies are exact or ≤ 2 ms error.
+  At 240 Hz (4.2 ms frame):   all frequencies essentially exact.
+
+For research requiring precise stimulus timing, use a monitor with ≥ 120 Hz
+refresh rate, or use a photodiode to measure actual onset times.
