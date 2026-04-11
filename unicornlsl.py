@@ -52,7 +52,10 @@ print('started LSL stream: name=%s, type=%s, id=%s' % (lsl_name, lsl_type, lsl_i
 s.write(start_acq)
 response = s.read(3)
 if response != b'\x00\x00\x00':
-    raise RuntimeError("cannot start data stream")
+    response = s.read(3)
+    print("start response:", response.hex())
+    if response != b'\x00\x00\x00':
+        raise RuntimeError("cannot start data stream")
 
 print('started Unicorn')
 
@@ -61,7 +64,7 @@ print('started Unicorn')
 #   [2]     battery/status
 #   [3:27]  8 EEG channels, 3 bytes each (big-endian 24-bit signed)
 #   [27:33] accelerometer,  3 × 2 bytes  (little-endian 16-bit signed)
-#   [33:39] gyroscope,      3 × 2 bytes  (little-endian 16-bit signed)  ← was reading [27:33] (accel bytes)
+#   [33:39] gyroscope,      3 × 2 bytes  (little-endian 16-bit signed)
 #   [39:43] sample counter  (little-endian 32-bit unsigned)
 #   [43:45] end sequence    0x0D 0x0A
 
@@ -114,8 +117,17 @@ try:
         if (counter % fsample) == 0:
             print('received %d samples, battery %d %%' % (counter, battery))
 
-except:
-    print('closing')
+except KeyboardInterrupt:
+    print('\nstopping...')
     s.write(stop_acq)
+    ack = s.read(3)  # wait for headset to acknowledge stop before closing
+    print('headset acknowledged stop' if ack == b'\x00\x00\x00' else 'no ack from headset: ' + ack.hex())
+    s.close()
+    del outlet
+    print('done')
+except Exception as e:
+    print('error: ', e)
+    s.write(stop_acq)
+    s.read(3)  # still wait for ack before closing
     s.close()
     del outlet

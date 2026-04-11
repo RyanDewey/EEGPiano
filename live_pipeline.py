@@ -25,7 +25,7 @@ print("Looking for LSL streams...")
 # Looks for relevant streams (marker and EEG), might need to change the names
 
 marker_stream = [s for s in streams if s.type() == "Markers"]
-eeg_stream = [s for s in streams if s.type() == "Unicorn"] # Rename the EEG channel later, I don't rememeber what it was called
+eeg_stream = [s for s in streams if s.type() == "EEG"] # Rename the EEG channel later, I don't rememeber what it was called
 
 # Handles cases where stream is not found
 
