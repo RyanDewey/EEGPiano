@@ -8,38 +8,36 @@ import time
 import pickle
 import numpy as np
 from scipy import signal
-from pylsl import StreamInlet, resolve_streams
+from pylsl import StreamInlet, resolve_streams, resolve_byprop
 from fbtrca_model import FBTRCA, class_to_freq_map # fbtcra_model derived from Ryan's code should be in the same folder
 
-# Finds all streams on PC
-
+# Finds all streams on PC for debugging purposes
 streams = resolve_streams()
-
-# Prints all streams on PC for debugging purposes
-
 for s in streams:
     print(s.name(), s.type())
 
 print("Looking for LSL streams...")
 
-# Looks for relevant streams (marker and EEG), might need to change the names
-
+# Optional marker stream: try once
 marker_stream = [s for s in streams if s.type() == "Markers"]
-eeg_stream = [s for s in streams if s.type() == "EEG"] # Rename the EEG channel later, I don't rememeber what it was called
-
-# Handles cases where stream is not found
-
 if not marker_stream:
     print("No marker stream found.")
+    markers = None
 else:
     markers = StreamInlet(marker_stream[0])
     print("Connected to marker stream!")
 
-if not eeg_stream:
-    print("No EEG stream found.") # Change to raise RuntimeError("No EEG stream found")
-else:
-    eeg = StreamInlet(eeg_stream[0])
-    print("Connected to EEG stream!")
+# Required EEG stream: keep waiting until it appears
+print("Waiting for EEG stream to resolve...")
+while True:
+    eeg_stream = resolve_byprop("type", "EEG", timeout=2)
+    if eeg_stream:
+        eeg = StreamInlet(eeg_stream[0])
+        print("Connected to EEG stream!")
+        break
+
+    print("No EEG stream found yet. Retrying in 1 second...")
+    time.sleep(1)
 
 # Loading the FBTCRA model with pickle
 
@@ -47,7 +45,7 @@ with open("fbtrca_model.pkl", "rb") as f: # "rb" is read binary
     state = pickle.load(f)
 
 if not state:
-    print("Could not find fbtrca_model.pk1 in directory.")
+    print("Could not find fbtrca_model.pkl in directory.")
 else:
     print("Loaded FBTRCA model.")
     
@@ -158,6 +156,7 @@ while True:
 
     if chunk:
         new_data = np.asarray(chunk, dtype=np.float64).T # Transpose turns it into (n_samples, n_channels)
+        new_data = new_data[:n_channels, :]
     else:
         continue
 
@@ -210,4 +209,4 @@ while True:
 
         predicted_class, fused_scores = model.predict(epoch)
         predicted_frequency = freq_map[predicted_class]
-        print(f"Scores: {predicted_class}")
+        print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}")
