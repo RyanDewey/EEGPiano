@@ -4,11 +4,17 @@ import time
 import signal
 import sys
 
+# ── Mode switch ───────────────────────────────────────────────────────────────
+# TRAINING_MODE = True  → only stream EEG + show stimulus (use Lab Recorder to save .xdf)
+# TRAINING_MODE = False → also run live_pipeline.py for real-time FBTRCA classification
+TRAINING_MODE = True
+
 scripts = {
-    "GUI":   "ssvep_stimulus.py",
-    "LSL":   "unicornlsl.py",
-    "MODEL": "live_pipeline.py"
+    "GUI": "ssvep_stimulus.py",
+    "LSL": "unicornlsl.py",
 }
+if not TRAINING_MODE:
+    scripts["MODEL"] = "live_pipeline.py"
 
 def stream_output(process, name):
     for line in process.stdout:
