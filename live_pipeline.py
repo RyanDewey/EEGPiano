@@ -8,8 +8,9 @@ import time
 import pickle
 import numpy as np
 from scipy import signal
-from pylsl import StreamInlet, resolve_streams, resolve_byprop
+from pylsl import StreamInlet, resolve_streams, resolve_byprop, StreamInfo, StreamOutlet
 from fbtrca_model import FBTRCA, class_to_freq_map # fbtcra_model derived from Ryan's code should be in the same folder
+
 
 # Finds all streams on PC for debugging purposes
 streams = resolve_streams()
@@ -26,6 +27,18 @@ if not marker_stream:
 else:
     markers = StreamInlet(marker_stream[0])
     print("Connected to marker stream!")
+
+# ── LSL prediction outlet ─────────────────────────────────────────────────────
+pred_info = StreamInfo(
+    name='SSVEPPredictions',
+    type='Predictions',
+    channel_count=1,
+    nominal_srate=0,          # irregular / event-driven
+    channel_format='float32',
+    source_id='ssvep_pred',
+)
+pred_outlet = StreamOutlet(pred_info)
+print('[LSL] Prediction outlet "SSVEPPredictions" ready.')
 
 # Required EEG stream: keep waiting until it appears
 print("Waiting for EEG stream to resolve...")
@@ -209,4 +222,7 @@ while True:
 
         predicted_class, fused_scores = model.predict(epoch)
         predicted_frequency = freq_map[predicted_class]
-        print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}")
+        print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}")\
+        
+        # ── Push prediction over LSL ──────────────────────────────────────
+        pred_outlet.push_sample([float(predicted_frequency)])

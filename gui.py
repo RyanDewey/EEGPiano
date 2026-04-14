@@ -310,10 +310,10 @@ def main():
                         now          = 0.0
                         prev_phases  = [0] * len(FREQUENCIES)
                         marker_outlet.push_sample([float(MARKER_EXP_START)])
-                        print(f'[LSL] {MARKER_EXP_START} → Experiment START')
+                        print(f'[GUI] {MARKER_EXP_START} → Experiment START')
                     else:
                         marker_outlet.push_sample([float(MARKER_EXP_STOP)])
-                        print(f'[LSL] {MARKER_EXP_STOP} → Experiment STOP')
+                        print(f'[GUI] {MARKER_EXP_STOP} → Experiment STOP')
 
                 # Keys 1–6 select/deselect target
                 num_keys = [
@@ -325,13 +325,13 @@ def main():
                         note_sounds[i].play()
                         if target_idx == i:
                             target_idx = -1
-                            print('[LSL] Target cleared')
+                            print('[GUI] Target cleared')
                         else:
                             target_idx = i
                             freq       = FREQUENCIES[i]
                             mv         = float(MARKER_TARGET_BASE + freq)
                             marker_outlet.push_sample([mv])
-                            print(f'[LSL] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
+                            print(f'[GUI] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
 
         # ── Compute phases & send onset markers ───────────────────────────
         phases = []
