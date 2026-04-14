@@ -20,6 +20,7 @@ import string
 import sys
 import time
 
+import numpy as np   
 import pygame
 from pylsl import StreamInfo, StreamOutlet
 
@@ -179,10 +180,62 @@ class Piano:
             pygame.draw.rect(surface, col, (x, self.rect.y, w, int(self.bkh)))
 
 
+# ─── Piano sound ────────────────────────────────────────────────────────────────────
+
+def _build_piano_sound(midi_note: int, duration: float = 1.0,
+                       sample_rate: int = 44100) -> pygame.mixer.Sound:
+    """
+    Synthesize a piano-like tone for *midi_note* using additive synthesis
+    + an ADSR envelope.  Returns a ready-to-play pygame Sound.
+
+    Frequency formula: f = 440 × 2^((midi − 69) / 12)
+    """
+    freq = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+    n    = int(sample_rate * duration)
+    t    = np.linspace(0.0, duration, n, endpoint=False)
+
+    # Additive harmonics (approximate piano timbre)
+    wave = (
+        1.00 * np.sin(2 * np.pi * 1 * freq * t) +
+        0.50 * np.sin(2 * np.pi * 2 * freq * t) +
+        0.25 * np.sin(2 * np.pi * 3 * freq * t) +
+        0.12 * np.sin(2 * np.pi * 4 * freq * t) +
+        0.06 * np.sin(2 * np.pi * 5 * freq * t) +
+        0.03 * np.sin(2 * np.pi * 6 * freq * t)
+    )
+    wave /= np.max(np.abs(wave))          # normalize to ±1
+
+    # ADSR envelope
+    atk = int(0.005 * sample_rate)        # 5 ms  – fast piano attack
+    dec = int(0.150 * sample_rate)        # 150 ms decay
+    rel = int(0.500 * sample_rate)        # 500 ms release tail
+    sus = max(n - atk - dec - rel, 0)    # sustain fills the remainder
+    sus_lvl = 0.60
+
+    env = np.concatenate([
+        np.linspace(0.0,     1.0,     atk),
+        np.linspace(1.0,     sus_lvl, dec),
+        np.full(sus,         sus_lvl),
+        np.linspace(sus_lvl, 0.0,     rel),
+    ])[:n]
+
+    wave = (wave * env * 0.80 * 32767).astype(np.int16)
+    stereo = np.column_stack([wave, wave])   # pygame needs stereo
+    return pygame.sndarray.make_sound(stereo)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+
     pygame.init()
+
+    # ── Audio ──────────────────────────────────────────────────────────────
+    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+    print('[Audio] Pre-building piano note sounds …')
+    note_sounds = [_build_piano_sound(m) for m in NOTE_MIDI]
+    print('[Audio] Ready.')
+
     flags = pygame.FULLSCREEN if FULLSCREEN else 0
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H), flags)
     pygame.display.set_caption('SSVEP Piano – EEG Data Collection')
@@ -202,7 +255,7 @@ def main():
         source_id=f'ssvep_{_uid()}',
     )
     marker_outlet = StreamOutlet(m_info)
-    print('[LSL] Marker outlet "SSVEPMarkers" ready.')
+    print('[GUI] Marker outlet "SSVEPMarkers" ready.')
 
     # ── Layout ────────────────────────────────────────────────────────────
     piano_h    = int(SCREEN_H * PIANO_H_FRAC)
@@ -269,6 +322,7 @@ def main():
                 ]
                 for i, k in enumerate(num_keys):
                     if event.key == k:
+                        note_sounds[i].play()
                         if target_idx == i:
                             target_idx = -1
                             print('[LSL] Target cleared')
