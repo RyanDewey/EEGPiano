@@ -22,7 +22,8 @@ import time
 
 import numpy as np   
 import pygame
-from pylsl import StreamInfo, StreamOutlet
+from pylsl import StreamInfo, StreamOutlet, StreamInlet, resolve_byprop
+
 
 # ─── Display & Stimulus Config ────────────────────────────────────────────────
 
@@ -227,7 +228,6 @@ def _build_piano_sound(midi_note: int, duration: float = 1.0,
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-
     pygame.init()
 
     # ── Audio ──────────────────────────────────────────────────────────────
@@ -244,6 +244,15 @@ def main():
     font_lg = pygame.font.SysFont('Arial', 28, bold=True)
     font_md = pygame.font.SysFont('Arial', 20)
     font_sm = pygame.font.SysFont('Arial', 14)
+
+    # ── LSL prediction inlet (non-blocking) ───────────────────────────────
+    pred_inlet = None
+    pred_streams = resolve_byprop('name', 'SSVEPPredictions', timeout=1.0)
+    if pred_streams:
+        pred_inlet = StreamInlet(pred_streams[0])
+        print('[GUI] Connected to SSVEPPredictions stream.')
+    else:
+        print('[GUI] No prediction stream found — running in manual mode only.')
 
     # ── LSL marker outlet ──────────────────────────────────────────────────
     m_info = StreamInfo(
@@ -345,6 +354,17 @@ def main():
 
         if running_stim:
             prev_phases = phases[:]
+
+        # ── Poll for incoming predictions ─────────────────────────────────
+        if pred_inlet is not None:
+            sample, _ = pred_inlet.pull_sample(timeout=0.0)  # non-blocking
+            if sample is not None:
+                predicted_freq = sample[0]
+                if predicted_freq in FREQUENCIES:
+                    pred_idx = FREQUENCIES.index(predicted_freq)
+                    note_sounds[pred_idx].play()
+                    target_idx = pred_idx   # highlight the predicted key
+                    print(f'[GUI] {predicted_freq} Hz → {NOTE_NAMES[pred_idx]}')
 
         # ── Draw ─────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
