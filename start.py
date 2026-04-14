@@ -10,7 +10,7 @@ import sys
 TRAINING_MODE = True
 
 scripts = {
-    "GUI": "ssvep_stimulus.py",
+    "GUI": "gui.py",
     "LSL": "unicornlsl.py",
 }
 if not TRAINING_MODE:
