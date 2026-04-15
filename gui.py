@@ -379,19 +379,7 @@ def main():
         # ── Poll EMG navigation ───────────────────────────────────────────────────
         if emg_inlet is not None:
             emg_sample, _ = emg_inlet.pull_sample(timeout=0.0)
-            if emg_sample is not None:
-                direction = int(emg_sample[0])   # -1, 0, or +1
-                if direction != 0:
-                    # Shift target index, clamped to valid range
-                    new_idx = (target_idx if target_idx >= 0 else 0) + direction
-                    new_idx = max(0, min(len(FREQUENCIES) - 1, new_idx))
-                    if new_idx != target_idx:
-                        target_idx = new_idx
-                        note_sounds[target_idx].play()
-                        freq = FREQUENCIES[target_idx]
-                        marker_outlet.push_sample([float(MARKER_TARGET_BASE + freq)])
-                        print(f'[GUI] EMG → target: {freq} Hz ({NOTE_NAMES[target_idx]})')
-
+            # EMG input currently disabled
         
         # ── Draw ─────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
