@@ -12,6 +12,7 @@ TRAINING_MODE = True
 scripts = {
     "GUI": "gui.py",
     "LSL": "unicornlsl.py",
+    "EMG": "EMG_live.py", 
 }
 if not TRAINING_MODE:
     scripts["MODEL"] = "live_pipeline.py"
