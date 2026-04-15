@@ -254,6 +254,16 @@ def main():
     else:
         print('[GUI] No prediction stream found — running in manual mode only.')
 
+    # ── LSL EMG control inlet (non-blocking) ──────────────────────────────────
+    emg_inlet = None
+    emg_streams = resolve_byprop('name', 'EMGControl', timeout=1.0)
+    if emg_streams:
+        emg_inlet = StreamInlet(emg_streams[0])
+        print('[GUI] Connected to EMGControl stream.')
+    else:
+        print('[GUI] No EMG stream found — keyboard-only mode.')
+
+    
     # ── LSL marker outlet ──────────────────────────────────────────────────
     m_info = StreamInfo(
         name='SSVEPMarkers',
@@ -366,6 +376,23 @@ def main():
                     target_idx = pred_idx   # highlight the predicted key
                     print(f'[GUI] {predicted_freq} Hz → {NOTE_NAMES[pred_idx]}')
 
+        # ── Poll EMG navigation ───────────────────────────────────────────────────
+        if emg_inlet is not None:
+            emg_sample, _ = emg_inlet.pull_sample(timeout=0.0)
+            if emg_sample is not None:
+                direction = int(emg_sample[0])   # -1, 0, or +1
+                if direction != 0:
+                    # Shift target index, clamped to valid range
+                    new_idx = (target_idx if target_idx >= 0 else 0) + direction
+                    new_idx = max(0, min(len(FREQUENCIES) - 1, new_idx))
+                    if new_idx != target_idx:
+                        target_idx = new_idx
+                        note_sounds[target_idx].play()
+                        freq = FREQUENCIES[target_idx]
+                        marker_outlet.push_sample([float(MARKER_TARGET_BASE + freq)])
+                        print(f'[GUI] EMG → target: {freq} Hz ({NOTE_NAMES[target_idx]})')
+
+        
         # ── Draw ─────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
 
