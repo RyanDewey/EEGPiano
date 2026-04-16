@@ -1,228 +1,252 @@
-# This is the main file that is designed to handle the live EEG data
-# Works with fbtrca_model.py file
-# From Keira
-
-# Necessary Imports
+# Live SSVEP pipeline — 4-frequency accuracy test
+# Loads fbtrca_model_4freq.pkl (2 s window, 1 s stride)
+# Tracks classification accuracy against cue markers from gui.py
 
 import time
 import pickle
+import traceback
 import numpy as np
+from collections import defaultdict
 from scipy import signal
-from pylsl import StreamInlet, resolve_streams, resolve_byprop, StreamInfo, StreamOutlet
-from fbtrca_model import FBTRCA, class_to_freq_map # fbtcra_model derived from Ryan's code should be in the same folder
+from pylsl import StreamInlet, resolve_byprop, StreamInfo, StreamOutlet
+from fbtrca_model import FBTRCA, class_to_freq_map
 
-
-# Finds all streams on PC for debugging purposes
-streams = resolve_streams()
-for s in streams:
-    print(s.name(), s.type())
-
-print("Looking for LSL streams...")
-
-# Optional marker stream: try once
-marker_stream = [s for s in streams if s.type() == "Markers"]
-if not marker_stream:
-    print("No marker stream found.")
-    markers = None
-else:
-    markers = StreamInlet(marker_stream[0])
-    print("Connected to marker stream!")
+MARKER_SESSION_END = 255.0
+MARKER_TARGET_BASE = 100.0   # cue marker = 100 + freq
+MARKER_STIM_START  = 252.0
+MARKER_STIM_STOP   = 253.0
 
 # ── LSL prediction outlet ─────────────────────────────────────────────────────
-pred_info = StreamInfo(
-    name='SSVEPPredictions',
-    type='Predictions',
-    channel_count=1,
-    nominal_srate=0,          # irregular / event-driven
-    channel_format='float32',
-    source_id='ssvep_pred',
-)
+pred_info = StreamInfo('SSVEPPredictions', 'Predictions', 1, 0, 'float32', 'ssvep_pred')
 pred_outlet = StreamOutlet(pred_info)
-print('[LSL] Prediction outlet "SSVEPPredictions" ready.')
+print('[MODEL] Prediction outlet "SSVEPPredictions" ready.')
 
-# Required EEG stream: keep waiting until it appears
-print("Waiting for EEG stream to resolve...")
+# ── Wait for marker stream (from gui.py) ──────────────────────────────────────
+print('[MODEL] Waiting for SSVEPMarkers stream...')
 while True:
-    eeg_stream = resolve_byprop("type", "EEG", timeout=2)
-    if eeg_stream:
-        eeg = StreamInlet(eeg_stream[0])
-        print("Connected to EEG stream!")
+    ms = resolve_byprop('type', 'Markers', timeout=2)
+    if ms:
+        markers = StreamInlet(ms[0])
+        print('[MODEL] Connected to marker stream.')
         break
-
-    print("No EEG stream found yet. Retrying in 1 second...")
+    print('[MODEL] No marker stream yet, retrying...')
     time.sleep(1)
 
-# Loading the FBTCRA model with pickle
+# ── Wait for EEG stream ───────────────────────────────────────────────────────
+print('[MODEL] Waiting for EEG stream...')
+while True:
+    es = resolve_byprop('type', 'EEG', timeout=2)
+    if es:
+        eeg = StreamInlet(es[0])
+        print('[MODEL] Connected to EEG stream.')
+        break
+    print('[MODEL] No EEG stream yet, retrying...')
+    time.sleep(1)
 
-with open("fbtrca_model.pkl", "rb") as f: # "rb" is read binary
+# ── Load model ────────────────────────────────────────────────────────────────
+with open('fbtrca_model_751012.pkl', 'rb') as f:
     state = pickle.load(f)
 
-if not state:
-    print("Could not find fbtrca_model.pkl in directory.")
-else:
-    print("Loaded FBTRCA model.")
-    
+print('[MODEL] Loaded fbtrca_model_751012.pkl')
 
-# Loading the trained model
+model       = state['model']
+freqs       = state['freqs']
+freq_to_class = state['freq_to_class']
+sfreq       = state['sfreq']
+WIN_SEC     = state['win_sec']       # 2.0 s
+STRIDE_SEC  = state['stride_sec']   # 1.0 s
+DROP_START  = state['drop_start_sec']
+DROP_END    = state['drop_end_sec']
+LINE_FREQ   = state['line_freq']
+BANDPASS    = state['bandpass']
+RESAMPLE_HZ = state['resample_hz']
+FB_BANDS    = state['fb_bands']
+WEIGHT_EXP  = state['weight_exp']
 
-model = state["model"]
-
-# Loading the hyperparameters
-
-freqs = state["freqs"]
-freq_to_class = state["freq_to_class"]
-sfreq = state["sfreq"]
-WIN_SEC = state["win_sec"]
-STRIDE_SEC = state["stride_sec"]
-DROP_START_SEC = state["drop_start_sec"]
-DROP_END_SEC = state["drop_end_sec"]
-LINE_FREQ = state["line_freq"]
-BANDPASS = state["bandpass"]
-RESAMPLE_HZ = state["resample_hz"]
-FB_BANDS = state["fb_bands"]
-WEIGHT_EXP = state["weight_exp"]
-
-# Making sure the FBTRCA model is trained on an 8 channel EEG
-
-n_channels = state.get("n_channels", None)
+n_channels = state.get('n_channels', None)
 if n_channels is None:
     _, first_template = model.models[0][0]
     n_channels = first_template.shape[0]
 
-print(f"Expected channels: {n_channels}")
-
-print("Number of classes:", model.K)
-
-# Create the dictionary to map classes to frequencies
-
 freq_map = class_to_freq_map(freq_to_class)
 
-# Preprocessing helper function
-# Takes the data in chunks (epoch) and uses hyperparameters defined in fbtrca_model to preprocess data
-# Based on Ryan's code
+print(f'[MODEL] Classes: {model.K}  |  Frequencies: {sorted(freq_to_class.keys())}')
+print(f'[MODEL] Window: {WIN_SEC}s  |  Stride: {STRIDE_SEC}s  |  Channels: {n_channels}')
+
+# ── Preprocessing ─────────────────────────────────────────────────────────────
 
 def preprocess(epoch, sfreq, line_freq, bandpass, resample_hz):
-
-    # Epoch is just a chunk of EEG data
-    # It needs to be converted into a numpy array
-
     epoch = np.array(epoch, dtype=np.float64)
-
-    # Remove average signal from epochs to try to extract key features
-
     epoch = epoch - epoch.mean(axis=0, keepdims=True)
 
-    # Setting constants
-
-    nyq = sfreq/2 # Nyquist frequency
-    nf = line_freq #Notch frequency
-
-    # Notch filter
-
+    nyq = sfreq / 2
+    nf  = line_freq
     while nf < nyq:
-        b, a = signal.iirnotch(w0=nf, Q=30, fs=sfreq) # Create notch filter
-        epoch = signal.filtfilt(b, a, epoch, axis=-1) # Apply notch filter
-        nf += line_freq
+        b, a  = signal.iirnotch(w0=nf, Q=30, fs=sfreq)
+        epoch = signal.filtfilt(b, a, epoch, axis=-1)
+        nf   += line_freq
 
-    # Bandpass filter
+    sos   = signal.butter(4, [bandpass[0], bandpass[1]],
+                          btype='bandpass', fs=sfreq, output='sos')
+    epoch = signal.sosfiltfilt(sos, epoch, axis=-1)
 
-    sos = signal.butter(
-        4, # Filter order
-        [bandpass[0], bandpass[1]], # Lower and upper cutoff frequencies
-        btype="bandpass",
-        fs=sfreq,
-        output="sos"
-    )
-    epoch=signal.sosfiltfilt(sos, epoch, axis=-1) # Apply bandpass filter
+    if abs(sfreq - resample_hz) > 1e-9:
+        n_out = int(round(epoch.shape[1] * (resample_hz / sfreq)))
+        epoch = signal.resample(epoch, n_out, axis=-1)
+        sfreq = float(resample_hz)
 
-    # Changing the sampling rate if needed
-
-    if abs(sfreq - resample_hz) > 1e-9: # Determine if resampling is needed
-        n_out = int(round(epoch.shape[1] * (resample_hz / sfreq))) # Find difference in sampling rate
-        epoch = signal.resample(epoch, n_out, axis=-1) # Perform resampling
-        sfreq = float(resample_hz) # Update sampling rate
-    
-    # Returns final results
+    # Detrend then normalize — matches offline windowize order
+    epoch = signal.detrend(epoch, axis=-1, type='linear')
+    std   = epoch.std(axis=-1, keepdims=True) + 1e-12
+    epoch = epoch / std
 
     return epoch, sfreq
 
-# Setting constants for the batches
+# ── Rolling buffer ────────────────────────────────────────────────────────────
 
-buffer = 3 # Seconds FIDDLE WITH THIS FOR TESTING PURPOSES!!!!!!!
-buffer_len = int(buffer * sfreq)
-window_len = int(WIN_SEC * sfreq)
+# Keep extra context on each side of the window so the bandpass filter
+# (0.5 Hz lowcut, period = 2 s) has room to settle before we crop.
+FILTER_PAD_SEC = 2.0                             # seconds of padding each side
+filter_pad     = int(FILTER_PAD_SEC * sfreq)
 
-# Creates an array of shape 8 x buffer_len that's all zeroes
+buffer_sec  = max(3.0, WIN_SEC + 1.0) + FILTER_PAD_SEC
+buffer_len  = int(buffer_sec * sfreq)
+window_len  = int(WIN_SEC * sfreq)
+drop_warmup = int(DROP_START * sfreq)   # samples to skip at trial start
+batch       = np.zeros((n_channels, buffer_len), dtype=np.float64)
 
-batch = np.zeros((n_channels, buffer_len), dtype=np.float64) 
-
-samples_seen = 0
+samples_seen      = 0
 last_predict_time = time.time()
 
-# Now, time for the rolling windows
+# ── Accuracy tracking ─────────────────────────────────────────────────────────
+
+current_target  = None   # frequency being cued this trial
+trial_idx       = 0
+trial_correct   = 0
+trial_total     = 0
+total_correct   = 0
+total_total     = 0
+per_freq        = defaultdict(lambda: [0, 0])  # freq → [correct, total]
+session_done    = False
+
+print('[MODEL] Running — waiting for trial cue markers from GUI...\n')
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 while True:
-    
-    # Pulling new EEG samples
 
-    chunk, timestamps = eeg.pull_chunk(timeout=0.0) # Shape of chunk is (n_samples, n_channels)
-
+    # ── Pull EEG chunk ────────────────────────────────────────────────────────
+    chunk, _ = eeg.pull_chunk(timeout=0.0)
     if chunk:
-        new_data = np.asarray(chunk, dtype=np.float64).T # Transpose turns it into (n_samples, n_channels)
-        new_data = new_data[:n_channels, :]
+        new_data    = np.asarray(chunk, dtype=np.float64).T
+        new_data    = new_data[:n_channels, :]
+
+        if new_data.shape[0] != n_channels:
+            print(f'[MODEL] WARNING: channel mismatch — got {new_data.shape[0]}, expected {n_channels}. Skipping chunk.')
+            continue
+
+        new_samples   = new_data.shape[1]
+        samples_seen += new_samples
+
+        if new_samples >= buffer_len:
+            batch = new_data[:, -buffer_len:]
+        else:
+            batch[:, :-new_samples] = batch[:, new_samples:]
+            batch[:, -new_samples:] = new_data
     else:
-        continue
+        time.sleep(0.002)
 
-    # Verify channel count for debugging purposes
+    # ── Pull marker (non-blocking) ────────────────────────────────────────────
+    m_sample, _ = markers.pull_sample(timeout=0.0)
+    if m_sample:
+        m = float(m_sample[0])
 
-    if new_data.shape[0] != n_channels:
-        raise RuntimeError(f"Channel mismatch: got {new_data.shape[0]}, expected {n_channels}")
-        continue
+        if 100 < m < 200:
+            # New trial started: record target frequency
+            new_target = m - MARKER_TARGET_BASE
+            if current_target is not None and trial_total > 0:
+                # Print result of previous trial before switching
+                acc = 100 * trial_correct / trial_total
+                print(f'[MODEL] ── Trial {trial_idx} result: '
+                      f'{trial_correct}/{trial_total} = {acc:.0f}%  '
+                      f'(target {current_target} Hz)\n')
+            current_target = new_target
+            trial_idx     += 1
+            trial_correct  = 0
+            trial_total    = 0
+            samples_seen   = 0
+            batch[:] = 0.0   # clear stale pre-trial data from buffer
+            print(f'[MODEL] ── Trial {trial_idx} started  →  target: {current_target} Hz')
 
-    new_samples = new_data.shape[1]
+        elif m == MARKER_STIM_STOP and current_target is not None and trial_total > 0:
+            acc = 100 * trial_correct / trial_total
+            print(f'[MODEL] ── Trial {trial_idx} result: '
+                  f'{trial_correct}/{trial_total} = {acc:.0f}%  '
+                  f'(target {current_target} Hz)\n')
 
-    samples_seen += new_samples
+        elif m == MARKER_SESSION_END:
+            # ── Print final summary ───────────────────────────────────────────
+            print()
+            print('[MODEL] ══════════════════════════════════════════')
+            print('[MODEL]           SESSION COMPLETE')
+            print('[MODEL] ══════════════════════════════════════════')
+            if total_total > 0:
+                oa = 100 * total_correct / total_total
+                print(f'[MODEL] Overall accuracy: '
+                      f'{total_correct}/{total_total} = {oa:.1f}%')
+            print('[MODEL] Per-frequency breakdown:')
+            for freq in sorted(per_freq):
+                c, t = per_freq[freq]
+                pa   = 100 * c / t if t > 0 else float('nan')
+                print(f'[MODEL]   {freq:5.1f} Hz  →  {c}/{t} = {pa:.0f}%')
+            print('[MODEL] ══════════════════════════════════════════\n')
+            session_done   = True
+            current_target = None
 
-    # In the case that the new batch is larger than or equal to the max length of the buffer, just keep the newst part of the batch
-
-    if new_samples >= buffer_len:
-        batch = new_data[:, -buffer_len:]
-
-    # If the batch is less than the size of the max buffer
-
-    else:
-        batch[:, :-new_samples] = batch[:, new_samples:] # Shifts current contents of the buffer to the left
-        batch[:, -new_samples:] = new_data # Fills empty space in buffer with new data
-
+    # ── Predict (on stride boundary) ─────────────────────────────────────────
     now = time.time()
-
     if now - last_predict_time >= STRIDE_SEC:
         last_predict_time = now
 
-        # Don't make a new prediction until enough samples exist
+        if samples_seen >= (window_len + drop_warmup):
+            try:
+                # Pull padded chunk so filters settle before the crop window
+                padded_len = window_len + filter_pad
+                padded     = batch[:, -padded_len:]
+                padded, _  = preprocess(padded, sfreq=sfreq, line_freq=LINE_FREQ,
+                                        bandpass=BANDPASS, resample_hz=RESAMPLE_HZ)
+                # After resampling the pad may have changed length — crop from right
+                crop = int(WIN_SEC * RESAMPLE_HZ)
+                epoch = padded[:, -crop:]
 
-        if samples_seen < window_len:
-            continue
+                # Amplitude rejection — matches offline windowize (amp_threshold=100.0)
+                ptp = epoch.max(axis=-1) - epoch.min(axis=-1)
+                if np.any(ptp > 100.0):
+                    print(f'[MODEL] Epoch rejected — artifact detected (max ptp={ptp.max():.1f})')
+                    continue
 
-        # Extract the newest window
+                predicted_class, _ = model.predict(epoch)
+                predicted_freq     = freq_map[predicted_class]
 
-        epoch = batch[:, -window_len:]
+                pred_outlet.push_sample([float(predicted_freq)])
 
-        # Preprocess extracted window
+                # ── Score against current trial target ────────────────────────
+                if current_target is not None and not session_done:
+                    correct = (predicted_freq == current_target)
+                    trial_correct += int(correct)
+                    trial_total   += 1
+                    total_correct += int(correct)
+                    total_total   += 1
+                    per_freq[current_target][0] += int(correct)
+                    per_freq[current_target][1] += 1
 
-        epoch, epoch_sfreq = preprocess(
-            epoch,
-            sfreq=sfreq,
-            line_freq=LINE_FREQ,
-            bandpass=BANDPASS,
-            resample_hz=RESAMPLE_HZ,
-        )
+                    mark = '✓' if correct else '✗'
+                    print(f'[MODEL] {mark}  predicted {predicted_freq:5.1f} Hz  '
+                          f'(target {current_target:5.1f} Hz)  '
+                          f'[{trial_correct}/{trial_total} this trial]')
+                else:
+                    print(f'[MODEL] predicted {predicted_freq} Hz  (no active trial)')
 
-        # Run the model on the epoch
-
-        predicted_class, fused_scores = model.predict(epoch)
-        predicted_frequency = freq_map[predicted_class]
-        print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}")\
-        
-        # ── Push prediction over LSL ──────────────────────────────────────
-        pred_outlet.push_sample([float(predicted_frequency)])
+            except Exception:
+                print('[MODEL] ERROR during prediction — skipping this window:')
+                traceback.print_exc()

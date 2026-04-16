@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-SSVEP Piano Stimulus Presentation with LSL Marker Streaming
-============================================================
-Six phase-reversing checkerboard stimuli at 4, 6, 8, 10, 12, 15 Hz are
-displayed above a piano keyboard.  Stimulus cycle-onset times are pushed
-to a dedicated LSL marker outlet ("SSVEPMarkers") so they align precisely
-with EEG data recorded from unicornlsl.py.
+SSVEP Accuracy Test — 7.5, 10, 12 Hz
+======================================
+Runs a 60-second automated accuracy test (6 trials × 10 s).
+Each frequency is tested exactly twice; live_pipeline.py scores
+predictions against the cue marker and prints overall accuracy at the end.
 
 Controls
 --------
-SPACE    – Start / stop stimulation  (markers 252 / 253)
-1–6      – Cue a target frequency     (marker 100 + freq)
-ESC / Q  – Quit
+SPACE   – Start test / restart after done
+ESC / Q – Quit
 """
 
 import math
@@ -20,60 +18,62 @@ import string
 import sys
 import time
 
-import numpy as np   
 import pygame
-from pylsl import StreamInfo, StreamOutlet, StreamInlet, resolve_byprop
+from pylsl import StreamInfo, StreamOutlet
 
+# ─── Display ──────────────────────────────────────────────────────────────────
 
-# ─── Display & Stimulus Config ────────────────────────────────────────────────
+SCREEN_W   = 1440
+SCREEN_H   = 900
+FULLSCREEN = False
+TARGET_FPS = 240
 
-SCREEN_W      = 1440
-SCREEN_H      = 900
-FULLSCREEN    = False   # flip to True for actual experiments
-TARGET_FPS    = 240     # high loop rate → accurate phase computation
+# ─── Stimulus config ──────────────────────────────────────────────────────────
 
-FREQUENCIES   = [6, 7.5, 10, 12, 15, 20]           # Hz
-NOTE_NAMES    = ['C3', 'E3', 'G3', 'C4', 'E4', 'G4']
-NOTE_MIDI     = [48,   52,   55,   60,   64,   67]  # MIDI 60 = C4
+FREQUENCIES = [7.5, 10, 12]
+NOTE_NAMES  = ['G3', 'A3', 'B3']
+NOTE_MIDI   = [55,   57,   59]
 
-# Per-frequency accent colours (borders / piano highlights / labels)
 FREQ_COLORS = [
-    (255,  70,  70),   # 4  Hz – Red
-    (255, 165,   0),   # 6  Hz – Orange
-    (120, 220,  80),   # 8  Hz – Green
-    ( 80, 160, 255),   # 10 Hz – Blue
-    (210,  80, 255),   # 12 Hz – Violet
-    (255, 120, 180),   # 15 Hz – Pink
+    (255, 165,   0),   # 7.5 Hz – Orange
+    ( 80, 160, 255),   # 10  Hz – Blue
+    (210,  80, 255),   # 12  Hz – Violet
 ]
 
-CHECKER_PX    = 15     # size of each checker square (pixels)
-STIM_PX       = 180    # stimulus box edge length (pixels)
-BORDER_PX     = 5      # normal border width; doubled for targeted stimulus
+CHECKER_PX = 15
+STIM_PX    = 210
+STIM_GAP   = 100
+BORDER_PX  = 5
 
-# ─── Piano Config ─────────────────────────────────────────────────────────────
+# ─── Test protocol ────────────────────────────────────────────────────────────
 
-PIANO_MIDI_START = 36   # C2
-PIANO_MIDI_END   = 83   # B5  (4 full octaves)
-PIANO_H_FRAC     = 0.28 # fraction of screen height occupied by keyboard
+N_TRIALS       = 6
+TRIAL_SEC      = 10.0
+COUNTDOWN_SECS = 3
+PAUSE_SECS     = 2
 
-WHITE_SEMITONES  = {0, 2, 4, 5, 7, 9, 11}   # C D E F G A B
-# Black-key centre position within an octave, in units of white-key width from C
-BK_OFFSETS = {1: 1.0, 3: 2.0, 6: 4.0, 8: 5.0, 10: 6.0}
-
-# ─── Colours ──────────────────────────────────────────────────────────────────
-
-BG_COLOR      = (18,  18,  28)
-STATUS_BG     = (28,  28,  42)
-TEXT_COLOR    = (220, 220, 220)
-DIM_COLOR     = ( 90,  90, 100)
-STATUS_H      = 50     # pixels
-
-# ─── LSL Marker Codes ─────────────────────────────────────────────────────────
-
-# Stimulus cycle onset → marker value equals the frequency (4, 6, 8, 10, 12, 15)
 MARKER_EXP_START   = 252
 MARKER_EXP_STOP    = 253
-MARKER_TARGET_BASE = 100   # target-cue marker = 100 + frequency
+MARKER_SESSION_END = 255
+MARKER_TARGET_BASE = 100   # marker = 100 + freq
+
+# States
+IDLE = 'idle'; COUNTDOWN = 'countdown'; RUNNING = 'running'
+PAUSE = 'pause'; DONE = 'done'
+
+# ─── Piano ────────────────────────────────────────────────────────────────────
+
+PIANO_MIDI_START = 36
+PIANO_MIDI_END   = 83
+PIANO_H_FRAC     = 0.28
+WHITE_SEMITONES  = {0, 2, 4, 5, 7, 9, 11}
+BK_OFFSETS       = {1: 1.0, 3: 2.0, 6: 4.0, 8: 5.0, 10: 6.0}
+
+BG_COLOR   = (18,  18,  28)
+STATUS_BG  = (28,  28,  42)
+TEXT_COLOR = (220, 220, 220)
+DIM_COLOR  = ( 90,  90, 100)
+STATUS_H   = 50
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -83,383 +83,320 @@ def _uid(n=6):
 
 
 def _draw_checkerboard(surface, rect, phase):
-    """Phase-reversing black/white checkerboard inside *rect*.
-    phase 0 → normal orientation; phase 1 → inverted.
-    """
     x0, y0, w, h = rect.x, rect.y, rect.width, rect.height
-    rows = math.ceil(h / CHECKER_PX)
-    cols = math.ceil(w / CHECKER_PX)
-    for r in range(rows):
-        for c in range(cols):
-            px = x0 + c * CHECKER_PX
-            py = y0 + r * CHECKER_PX
-            pw = min(CHECKER_PX, x0 + w - px)
-            ph = min(CHECKER_PX, y0 + h - py)
-            if pw <= 0 or ph <= 0:
-                continue
+    for r in range(math.ceil(h / CHECKER_PX)):
+        for c in range(math.ceil(w / CHECKER_PX)):
+            px = x0 + c * CHECKER_PX;  py = y0 + r * CHECKER_PX
+            pw = min(CHECKER_PX, x0 + w - px);  ph = min(CHECKER_PX, y0 + h - py)
+            if pw <= 0 or ph <= 0: continue
             white = (r + c + phase) % 2 == 0
-            pygame.draw.rect(surface, (255, 255, 255) if white else (0, 0, 0),
-                             (px, py, pw, ph))
+            pygame.draw.rect(surface, (255,255,255) if white else (0,0,0), (px,py,pw,ph))
 
 
-# ─── Piano ────────────────────────────────────────────────────────────────────
+def _draw_checkerboard_idle(surface, rect):
+    x0, y0, w, h = rect.x, rect.y, rect.width, rect.height
+    for r in range(math.ceil(h / CHECKER_PX)):
+        for c in range(math.ceil(w / CHECKER_PX)):
+            px = x0 + c * CHECKER_PX;  py = y0 + r * CHECKER_PX
+            pw = min(CHECKER_PX, x0 + w - px);  ph = min(CHECKER_PX, y0 + h - py)
+            if pw <= 0 or ph <= 0: continue
+            col = (70,70,80) if (r+c)%2==0 else (45,45,55)
+            pygame.draw.rect(surface, col, (px,py,pw,ph))
+
 
 class Piano:
-    """Draws a multi-octave piano keyboard and manages key highlights."""
-
-    def __init__(self, rect: pygame.Rect):
+    def __init__(self, rect):
         self.rect = rect
-        self.highlights: dict[int, tuple] = {}   # midi → RGB
-
-        n_white = sum(
-            1 for m in range(PIANO_MIDI_START, PIANO_MIDI_END + 1)
-            if m % 12 in WHITE_SEMITONES
-        )
-        self.wkw = rect.width / n_white   # white key width  (float)
+        self.highlights = {}
+        n_white = sum(1 for m in range(PIANO_MIDI_START, PIANO_MIDI_END+1)
+                      if m%12 in WHITE_SEMITONES)
+        self.wkw = rect.width / n_white
         self.wkh = rect.height
         self.bkw = self.wkw * 0.58
         self.bkh = self.wkh * 0.62
-
-        # Build white-key geometry
-        self.white_keys: list[dict] = []
-        w_idx = 0
-        for midi in range(PIANO_MIDI_START, PIANO_MIDI_END + 1):
-            if midi % 12 in WHITE_SEMITONES:
-                self.white_keys.append({
-                    'midi': midi,
-                    'x':    rect.x + w_idx * self.wkw,
-                })
-                w_idx += 1
-
+        self.white_keys = []
+        wi = 0
+        for midi in range(PIANO_MIDI_START, PIANO_MIDI_END+1):
+            if midi%12 in WHITE_SEMITONES:
+                self.white_keys.append({'midi': midi, 'x': rect.x + wi*self.wkw})
+                wi += 1
         wk_x = {wk['midi']: wk['x'] for wk in self.white_keys}
-
-        # Build black-key geometry
-        self.black_keys: list[dict] = []
-        for midi in range(PIANO_MIDI_START, PIANO_MIDI_END + 1):
-            s = midi % 12
+        self.black_keys = []
+        for midi in range(PIANO_MIDI_START, PIANO_MIDI_END+1):
+            s = midi%12
             if s in BK_OFFSETS:
-                c_midi = (midi // 12) * 12   # C of same octave
-                if c_midi in wk_x:
-                    bx = wk_x[c_midi] + BK_OFFSETS[s] * self.wkw - self.bkw / 2
-                    self.black_keys.append({'midi': midi, 'x': bx})
+                cm = (midi//12)*12
+                if cm in wk_x:
+                    self.black_keys.append({'midi': midi,
+                                            'x': wk_x[cm] + BK_OFFSETS[s]*self.wkw - self.bkw/2})
 
-    def key_center_x(self, midi: int) -> float:
-        if midi % 12 in WHITE_SEMITONES:
+    def key_center_x(self, midi):
+        if midi%12 in WHITE_SEMITONES:
             for wk in self.white_keys:
-                if wk['midi'] == midi:
-                    return wk['x'] + self.wkw / 2
+                if wk['midi'] == midi: return wk['x'] + self.wkw/2
         else:
             for bk in self.black_keys:
-                if bk['midi'] == midi:
-                    return bk['x'] + self.bkw / 2
+                if bk['midi'] == midi: return bk['x'] + self.bkw/2
         return float(self.rect.centerx)
 
-    def draw(self, surface: pygame.Surface, small_font: pygame.font.Font):
-        # White keys (drawn first so black keys paint on top)
+    def draw(self, surface, small_font):
         for wk in self.white_keys:
-            x   = int(wk['x'])
-            w   = max(1, int(self.wkw))
-            mid = wk['midi']
-            col = self.highlights.get(mid, (235, 235, 235))
-            pygame.draw.rect(surface, col,        (x, self.rect.y, w + 1, int(self.wkh)))
-            pygame.draw.rect(surface, (50, 50, 50), (x, self.rect.y, w + 1, int(self.wkh)), 1)
-            # Label every C
-            if mid % 12 == 0:
-                octave = mid // 12 - 1
-                lbl = small_font.render(f'C{octave}', True, (80, 80, 80))
-                surface.blit(lbl, (
-                    x + w // 2 - lbl.get_width() // 2,
-                    self.rect.y + self.wkh - lbl.get_height() - 5,
-                ))
-
-        # Black keys (painted over white keys)
+            x, w, mid = int(wk['x']), max(1,int(self.wkw)), wk['midi']
+            col = self.highlights.get(mid, (235,235,235))
+            pygame.draw.rect(surface, col,          (x, self.rect.y, w+1, int(self.wkh)))
+            pygame.draw.rect(surface, (50,50,50),   (x, self.rect.y, w+1, int(self.wkh)), 1)
+            if mid%12 == 0:
+                lbl = small_font.render(f'C{mid//12-1}', True, (80,80,80))
+                surface.blit(lbl, (x+w//2-lbl.get_width()//2,
+                                   self.rect.y+self.wkh-lbl.get_height()-5))
         for bk in self.black_keys:
-            x   = int(bk['x'])
-            w   = max(1, int(self.bkw))
-            mid = bk['midi']
-            col = self.highlights.get(mid, (25, 25, 25))
-            pygame.draw.rect(surface, col, (x, self.rect.y, w, int(self.bkh)))
-
-
-# ─── Piano sound ────────────────────────────────────────────────────────────────────
-
-def _build_piano_sound(midi_note: int, duration: float = 1.0,
-                       sample_rate: int = 44100) -> pygame.mixer.Sound:
-    """
-    Synthesize a piano-like tone for *midi_note* using additive synthesis
-    + an ADSR envelope.  Returns a ready-to-play pygame Sound.
-
-    Frequency formula: f = 440 × 2^((midi − 69) / 12)
-    """
-    freq = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
-    n    = int(sample_rate * duration)
-    t    = np.linspace(0.0, duration, n, endpoint=False)
-
-    # Additive harmonics (approximate piano timbre)
-    wave = (
-        1.00 * np.sin(2 * np.pi * 1 * freq * t) +
-        0.50 * np.sin(2 * np.pi * 2 * freq * t) +
-        0.25 * np.sin(2 * np.pi * 3 * freq * t) +
-        0.12 * np.sin(2 * np.pi * 4 * freq * t) +
-        0.06 * np.sin(2 * np.pi * 5 * freq * t) +
-        0.03 * np.sin(2 * np.pi * 6 * freq * t)
-    )
-    wave /= np.max(np.abs(wave))          # normalize to ±1
-
-    # ADSR envelope
-    atk = int(0.005 * sample_rate)        # 5 ms  – fast piano attack
-    dec = int(0.150 * sample_rate)        # 150 ms decay
-    rel = int(0.500 * sample_rate)        # 500 ms release tail
-    sus = max(n - atk - dec - rel, 0)    # sustain fills the remainder
-    sus_lvl = 0.60
-
-    env = np.concatenate([
-        np.linspace(0.0,     1.0,     atk),
-        np.linspace(1.0,     sus_lvl, dec),
-        np.full(sus,         sus_lvl),
-        np.linspace(sus_lvl, 0.0,     rel),
-    ])[:n]
-
-    wave = (wave * env * 0.80 * 32767).astype(np.int16)
-    stereo = np.column_stack([wave, wave])   # pygame needs stereo
-    return pygame.sndarray.make_sound(stereo)
+            x, w, mid = int(bk['x']), max(1,int(self.bkw)), bk['midi']
+            pygame.draw.rect(surface, self.highlights.get(mid,(25,25,25)),
+                             (x, self.rect.y, w, int(self.bkh)))
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+def make_trial_sequence():
+    """Each frequency tested exactly twice, in random order."""
+    pool = FREQUENCIES * 2          # 6 entries — every freq appears exactly twice
+    random.shuffle(pool)
+    return pool
+
+
 def main():
     pygame.init()
-
-    # ── Audio ──────────────────────────────────────────────────────────────
-    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-    print('[Audio] Pre-building piano note sounds …')
-    note_sounds = [_build_piano_sound(m) for m in NOTE_MIDI]
-    print('[Audio] Ready.')
-
-    flags = pygame.FULLSCREEN if FULLSCREEN else 0
-    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H), flags)
-    pygame.display.set_caption('SSVEP Piano – EEG Data Collection')
+    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H),
+                                     pygame.FULLSCREEN if FULLSCREEN else 0)
+    pygame.display.set_caption('SSVEP Accuracy Test')
     clock = pygame.time.Clock()
 
-    font_lg = pygame.font.SysFont('Arial', 28, bold=True)
-    font_md = pygame.font.SysFont('Arial', 20)
+    font_xl = pygame.font.SysFont('Arial', 80, bold=True)
+    font_lg = pygame.font.SysFont('Arial', 32, bold=True)
+    font_md = pygame.font.SysFont('Arial', 22)
     font_sm = pygame.font.SysFont('Arial', 14)
 
-    # ── LSL prediction inlet (non-blocking) ───────────────────────────────
-    pred_inlet = None
-    pred_streams = resolve_byprop('name', 'SSVEPPredictions', timeout=1.0)
-    if pred_streams:
-        pred_inlet = StreamInlet(pred_streams[0])
-        print('[GUI] Connected to SSVEPPredictions stream.')
-    else:
-        print('[GUI] No prediction stream found — running in manual mode only.')
+    # ── LSL outlet ────────────────────────────────────────────────────────────
+    marker_outlet = StreamOutlet(StreamInfo(
+        'SSVEPMarkers', 'Markers', 1, 0, 'float32', f'ssvep_{_uid()}'))
+    print('[LSL] Marker outlet "SSVEPMarkers" ready.')
 
-    # ── LSL marker outlet ──────────────────────────────────────────────────
-    m_info = StreamInfo(
-        name='SSVEPMarkers',
-        type='Markers',
-        channel_count=1,
-        nominal_srate=0,            # irregular (event-driven)
-        channel_format='float32',
-        source_id=f'ssvep_{_uid()}',
-    )
-    marker_outlet = StreamOutlet(m_info)
-    print('[GUI] Marker outlet "SSVEPMarkers" ready.')
-
-    # ── Layout ────────────────────────────────────────────────────────────
+    # ── Layout ────────────────────────────────────────────────────────────────
     piano_h    = int(SCREEN_H * PIANO_H_FRAC)
     piano_rect = pygame.Rect(0, SCREEN_H - piano_h, SCREEN_W, piano_h)
     piano      = Piano(piano_rect)
 
-    stim_area_top = STATUS_H
-    stim_area_bot = piano_rect.y
-    stim_cy       = (stim_area_top + stim_area_bot) // 2   # vertical centre
+    stim_cy = (STATUS_H + piano_rect.y) // 2
+    n       = len(FREQUENCIES)
+    total_w = n * STIM_PX + (n-1) * STIM_GAP
+    x_start = (SCREEN_W - total_w) // 2 + STIM_PX // 2
+    stim_cx = [x_start + i*(STIM_PX+STIM_GAP) for i in range(n)]
+    key_cx  = [int(piano.key_center_x(m)) for m in NOTE_MIDI]
+    stim_rects = [pygame.Rect(cx-STIM_PX//2, stim_cy-STIM_PX//2, STIM_PX, STIM_PX)
+                  for cx in stim_cx]
 
-    # Spread stimuli evenly across the full screen width so they never overlap.
-    # Connector lines drop diagonally to the actual piano key positions below.
-    STIM_GAP  = 60   # pixels of clear space between adjacent stimulus boxes
-    n         = len(FREQUENCIES)
-    total_w   = n * STIM_PX + (n - 1) * STIM_GAP
-    x_start   = (SCREEN_W - total_w) // 2 + STIM_PX // 2
-    stim_cx   = [x_start + i * (STIM_PX + STIM_GAP) for i in range(n)]
+    # Progress bar geometry (drawn above piano)
+    BAR_H  = 12
+    BAR_Y  = piano_rect.y - BAR_H - 8
+    BAR_X  = stim_rects[0].x
+    BAR_W  = stim_rects[-1].right - stim_rects[0].x
 
-    # Piano key anchor x-positions (used only for connector lines)
-    key_cx = [int(piano.key_center_x(m)) for m in NOTE_MIDI]
+    # ── Test state ────────────────────────────────────────────────────────────
+    state          = IDLE
+    trial_seq      = make_trial_sequence()
+    trial_idx      = 0
+    state_t        = 0.0     # time.perf_counter() when state started
+    running_stim   = False
+    target_idx     = -1
+    prev_phases    = [0] * n
+    t_stim         = time.perf_counter()
 
-    # Pre-build stimulus rects
-    stim_rects = [
-        pygame.Rect(cx - STIM_PX // 2, stim_cy - STIM_PX // 2, STIM_PX, STIM_PX)
-        for cx in stim_cx
-    ]
+    def start_state(new_state):
+        nonlocal state, state_t
+        state   = new_state
+        state_t = time.perf_counter()
 
-    # ── Application state ─────────────────────────────────────────────────
-    running_stim = False
-    target_idx   = -1         # index into FREQUENCIES / NOTE_NAMES (-1 = none)
-    prev_phases  = [0] * len(FREQUENCIES)
-    t0           = time.perf_counter()
+    def send_target(tidx):
+        nonlocal target_idx
+        target_idx = tidx
+        freq = FREQUENCIES[tidx]
+        marker_outlet.push_sample([float(MARKER_TARGET_BASE + freq)])
+        print(f'[GUI] Trial {trial_idx+1}/{N_TRIALS} — target: {freq} Hz')
 
+    def start_stim():
+        nonlocal running_stim, t_stim, prev_phases
+        running_stim = True
+        t_stim       = time.perf_counter()
+        prev_phases  = [0] * n
+        marker_outlet.push_sample([float(MARKER_EXP_START)])
+
+    def stop_stim():
+        nonlocal running_stim
+        running_stim = False
+        marker_outlet.push_sample([float(MARKER_EXP_STOP)])
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
     while True:
-        now = time.perf_counter() - t0
+        now_abs = time.perf_counter()
+        elapsed = now_abs - state_t   # seconds in current state
 
-        # ── Event handling ────────────────────────────────────────────────
+        # ── Events ───────────────────────────────────────────────────────────
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-
+                pygame.quit(); sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    pygame.quit()
-                    sys.exit()
-
+                    if running_stim: stop_stim()
+                    pygame.quit(); sys.exit()
                 if event.key == pygame.K_SPACE:
-                    running_stim = not running_stim
-                    if running_stim:
-                        t0           = time.perf_counter()
-                        now          = 0.0
-                        prev_phases  = [0] * len(FREQUENCIES)
-                        marker_outlet.push_sample([float(MARKER_EXP_START)])
-                        print(f'[GUI] {MARKER_EXP_START} → Experiment START')
-                    else:
-                        marker_outlet.push_sample([float(MARKER_EXP_STOP)])
-                        print(f'[GUI] {MARKER_EXP_STOP} → Experiment STOP')
+                    if state in (IDLE, DONE):
+                        trial_seq  = make_trial_sequence()
+                        trial_idx  = 0
+                        target_idx = -1
+                        send_target(FREQUENCIES.index(trial_seq[0]))
+                        start_state(COUNTDOWN)
 
-                # Keys 1–6 select/deselect target
-                num_keys = [
-                    pygame.K_1, pygame.K_2, pygame.K_3,
-                    pygame.K_4, pygame.K_5, pygame.K_6,
-                ]
-                for i, k in enumerate(num_keys):
-                    if event.key == k:
-                        note_sounds[i].play()
-                        if target_idx == i:
-                            target_idx = -1
-                            print('[GUI] Target cleared')
-                        else:
-                            target_idx = i
-                            freq       = FREQUENCIES[i]
-                            mv         = float(MARKER_TARGET_BASE + freq)
-                            marker_outlet.push_sample([mv])
-                            print(f'[GUI] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
+        # ── State machine ─────────────────────────────────────────────────────
+        if state == COUNTDOWN:
+            if elapsed >= COUNTDOWN_SECS:
+                start_stim()
+                start_state(RUNNING)
 
-        # ── Compute phases & send onset markers ───────────────────────────
+        elif state == RUNNING:
+            if elapsed >= TRIAL_SEC:
+                stop_stim()
+                trial_idx += 1
+                target_idx = -1
+                if trial_idx >= N_TRIALS:
+                    marker_outlet.push_sample([float(MARKER_SESSION_END)])
+                    print(f'[GUI] Session complete — {N_TRIALS} trials done.')
+                    start_state(DONE)
+                else:
+                    start_state(PAUSE)
+
+        elif state == PAUSE:
+            if elapsed >= PAUSE_SECS:
+                send_target(FREQUENCIES.index(trial_seq[trial_idx]))
+                start_state(COUNTDOWN)
+
+        # ── Phase computation ─────────────────────────────────────────────────
+        stim_now = time.perf_counter() - t_stim
         phases = []
         for i, freq in enumerate(FREQUENCIES):
-            # Phase toggles at `freq` Hz: 0 for first half-cycle, 1 for second
-            phase = int(now * freq * 2) % 2
+            phase = int(stim_now * freq * 2) % 2
             phases.append(phase)
-            # Rising edge of new cycle (1 → 0): one marker per cycle
             if running_stim and phase == 0 and prev_phases[i] != 0:
                 marker_outlet.push_sample([float(freq)])
-
         if running_stim:
             prev_phases = phases[:]
 
-        # ── Poll for incoming predictions ─────────────────────────────────
-        if pred_inlet is not None:
-            sample, _ = pred_inlet.pull_sample(timeout=0.0)  # non-blocking
-            if sample is not None:
-                predicted_freq = sample[0]
-                if predicted_freq in FREQUENCIES:
-                    pred_idx = FREQUENCIES.index(predicted_freq)
-                    note_sounds[pred_idx].play()
-                    target_idx = pred_idx   # highlight the predicted key
-                    print(f'[GUI] {predicted_freq} Hz → {NOTE_NAMES[pred_idx]}')
-
-        # ── Draw ─────────────────────────────────────────────────────────
+        # ── Draw ──────────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
 
-        # Piano highlights: always show frequency colour on target keys
-        piano.highlights = {NOTE_MIDI[i]: FREQ_COLORS[i] for i in range(len(FREQUENCIES))}
+        piano.highlights = {NOTE_MIDI[i]: FREQ_COLORS[i] for i in range(n)}
         piano.draw(screen, font_sm)
 
-        # Connector lines: diagonal from stimulus bottom-centre → piano key top
+        # Connector lines
         for i, cx in enumerate(stim_cx):
-            line_col    = tuple(max(0, c - 80) for c in FREQ_COLORS[i])
-            stim_bottom = stim_cy + STIM_PX // 2 + BORDER_PX + 2
-            pygame.draw.line(screen, line_col,
-                             (cx, stim_bottom), (key_cx[i], piano_rect.y), 2)
+            line_col    = tuple(max(0, c-80) for c in FREQ_COLORS[i])
+            stim_bottom = stim_cy + STIM_PX//2 + BORDER_PX + 2
+            pygame.draw.line(screen, line_col, (cx, stim_bottom), (key_cx[i], piano_rect.y), 2)
 
-        # Stimuli
+        # Stimulus boxes
         for i, rect in enumerate(stim_rects):
-            # Checkerboard fill
+            is_target = (target_idx == i)
+
             if running_stim:
                 _draw_checkerboard(screen, rect, phases[i])
             else:
-                # Idle: dim gray checkerboard (shows layout without flickering)
                 _draw_checkerboard_idle(screen, rect)
 
-            # Coloured border (thicker when this is the target)
-            is_target  = (target_idx == i)
-            bw         = BORDER_PX * 2 if is_target else BORDER_PX
-            bord_rect  = pygame.Rect(rect.x - bw, rect.y - bw,
-                                     rect.w + bw * 2, rect.h + bw * 2)
+            bw        = BORDER_PX * 2 if is_target else BORDER_PX
+            bord_rect = pygame.Rect(rect.x-bw, rect.y-bw, rect.w+bw*2, rect.h+bw*2)
             pygame.draw.rect(screen, FREQ_COLORS[i], bord_rect, bw)
 
-            # "TARGET" label above the border
             if is_target:
-                tgt_txt = font_md.render('▼ TARGET ▼', True, FREQ_COLORS[i])
-                screen.blit(tgt_txt, (
-                    rect.centerx - tgt_txt.get_width() // 2,
-                    rect.y - tgt_txt.get_height() - 28,
-                ))
+                # White outer glow
+                gr = pygame.Rect(bord_rect.x-4, bord_rect.y-4,
+                                 bord_rect.w+8, bord_rect.h+8)
+                pygame.draw.rect(screen, (255, 255, 255), gr, 3)
+                # Arrow above box
+                arrow = font_lg.render('▼ LOOK HERE ▼', True, FREQ_COLORS[i])
+                screen.blit(arrow, (rect.centerx - arrow.get_width()//2,
+                                    rect.y - arrow.get_height() - 30))
 
-            # Frequency label above stimulus
-            freq_txt = font_lg.render(f'{FREQUENCIES[i]} Hz', True, FREQ_COLORS[i])
-            screen.blit(freq_txt, (
-                rect.centerx - freq_txt.get_width() // 2,
-                rect.y - freq_txt.get_height() - 4,
-            ))
+            freq_txt = font_md.render(f'{FREQUENCIES[i]} Hz', True, FREQ_COLORS[i])
+            screen.blit(freq_txt, (rect.centerx - freq_txt.get_width()//2,
+                                   rect.y - freq_txt.get_height() - 4))
+            note_txt = font_sm.render(NOTE_NAMES[i], True, TEXT_COLOR)
+            screen.blit(note_txt, (rect.centerx - note_txt.get_width()//2,
+                                   rect.bottom + 6))
 
-            # Note name below stimulus
-            note_txt = font_md.render(NOTE_NAMES[i], True, TEXT_COLOR)
-            screen.blit(note_txt, (
-                rect.centerx - note_txt.get_width() // 2,
-                rect.bottom + 6,
-            ))
+        # Progress bar (shown during RUNNING)
+        if state == RUNNING:
+            fill = min(1.0, elapsed / TRIAL_SEC)
+            pygame.draw.rect(screen, (50, 50, 60), (BAR_X, BAR_Y, BAR_W, BAR_H), border_radius=4)
+            if fill > 0:
+                col = FREQ_COLORS[target_idx] if target_idx >= 0 else TEXT_COLOR
+                pygame.draw.rect(screen, col,
+                                 (BAR_X, BAR_Y, int(BAR_W * fill), BAR_H), border_radius=4)
+            secs_left = max(0.0, TRIAL_SEC - elapsed)
+            timer_txt = font_sm.render(f'{secs_left:.1f}s remaining', True, DIM_COLOR)
+            screen.blit(timer_txt, (BAR_X + BAR_W//2 - timer_txt.get_width()//2,
+                                    BAR_Y - timer_txt.get_height() - 2))
 
-        # ── Status bar ────────────────────────────────────────────────────
+        # Countdown overlay
+        if state == COUNTDOWN:
+            cd = max(0, COUNTDOWN_SECS - int(elapsed))
+            cd_surf = font_xl.render(str(cd) if cd > 0 else 'GO', True, (255, 255, 100))
+            screen.blit(cd_surf, (SCREEN_W//2 - cd_surf.get_width()//2,
+                                  stim_cy - cd_surf.get_height()//2))
+
+        # Done overlay
+        if state == DONE:
+            overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 180))
+            screen.blit(overlay, (0, 0))
+            done_txt = font_lg.render('Session Complete — accuracy results in terminal',
+                                      True, (100, 255, 100))
+            restart  = font_md.render('Press SPACE to run again   |   ESC to quit',
+                                      True, DIM_COLOR)
+            screen.blit(done_txt, (SCREEN_W//2 - done_txt.get_width()//2, SCREEN_H//2 - 40))
+            screen.blit(restart,  (SCREEN_W//2 - restart.get_width()//2,  SCREEN_H//2 + 10))
+
+        # ── Status bar ────────────────────────────────────────────────────────
         pygame.draw.rect(screen, STATUS_BG, (0, 0, SCREEN_W, STATUS_H))
 
-        state_str = 'RUNNING' if running_stim else 'STOPPED'
-        state_col = (80, 255, 80) if running_stim else (255, 80, 80)
-        s_left    = font_md.render(f'Stimulation: {state_str}', True, state_col)
-        screen.blit(s_left, (16, STATUS_H // 2 - s_left.get_height() // 2))
-
-        if target_idx >= 0:
-            t_str = f'Target: {FREQUENCIES[target_idx]} Hz  ({NOTE_NAMES[target_idx]})'
-            t_col = FREQ_COLORS[target_idx]
+        if state == IDLE:
+            msg     = 'Press SPACE to begin accuracy test  (6 trials × 10 s = 60 s total)'
+            msg_col = DIM_COLOR
+        elif state == COUNTDOWN:
+            freq = trial_seq[trial_idx]
+            msg     = f'Trial {trial_idx+1}/{N_TRIALS}  —  Focus on  {freq} Hz'
+            msg_col = FREQ_COLORS[FREQUENCIES.index(freq)]
+        elif state == RUNNING:
+            freq = trial_seq[trial_idx]
+            msg     = f'Trial {trial_idx+1}/{N_TRIALS}  —  RECORDING  —  target: {freq} Hz'
+            msg_col = FREQ_COLORS[FREQUENCIES.index(freq)]
+        elif state == PAUSE:
+            next_freq = trial_seq[trial_idx] if trial_idx < N_TRIALS else None
+            msg     = (f'Trial {trial_idx}/{N_TRIALS} done  —  '
+                       f'Next: {next_freq} Hz' if next_freq else 'Last trial done')
+            msg_col = TEXT_COLOR
         else:
-            t_str = 'Target: none   (press 1–6 to select)'
-            t_col = DIM_COLOR
-        s_mid = font_md.render(t_str, True, t_col)
-        screen.blit(s_mid, (SCREEN_W // 2 - s_mid.get_width() // 2,
-                             STATUS_H // 2 - s_mid.get_height() // 2))
+            msg     = f'Done — {N_TRIALS} trials complete'
+            msg_col = (100, 255, 100)
 
-        s_right = font_sm.render('SPACE = start/stop   1–6 = target   ESC = quit',
-                                  True, DIM_COLOR)
-        screen.blit(s_right, (SCREEN_W - s_right.get_width() - 14,
-                               STATUS_H // 2 - s_right.get_height() // 2))
+        status_surf = font_md.render(msg, True, msg_col)
+        screen.blit(status_surf, (SCREEN_W//2 - status_surf.get_width()//2,
+                                  STATUS_H//2 - status_surf.get_height()//2))
+
+        esc_hint = font_sm.render('ESC = quit', True, DIM_COLOR)
+        screen.blit(esc_hint, (SCREEN_W - esc_hint.get_width() - 14,
+                                STATUS_H//2 - esc_hint.get_height()//2))
 
         pygame.display.flip()
         clock.tick(TARGET_FPS)
-
-
-def _draw_checkerboard_idle(surface, rect):
-    """Dim gray static checkerboard shown when stimulation is stopped."""
-    x0, y0, w, h = rect.x, rect.y, rect.width, rect.height
-    rows = math.ceil(h / CHECKER_PX)
-    cols = math.ceil(w / CHECKER_PX)
-    for r in range(rows):
-        for c in range(cols):
-            px = x0 + c * CHECKER_PX
-            py = y0 + r * CHECKER_PX
-            pw = min(CHECKER_PX, x0 + w - px)
-            ph = min(CHECKER_PX, y0 + h - py)
-            if pw <= 0 or ph <= 0:
-                continue
-            col = (70, 70, 80) if (r + c) % 2 == 0 else (45, 45, 55)
-            pygame.draw.rect(surface, col, (px, py, pw, ph))
 
 
 if __name__ == '__main__':

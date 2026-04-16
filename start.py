@@ -7,7 +7,7 @@ import sys
 # ── Mode switch ───────────────────────────────────────────────────────────────
 # TRAINING_MODE = True  → only stream EEG + show stimulus (use Lab Recorder to save .xdf)
 # TRAINING_MODE = False → also run live_pipeline.py for real-time FBTRCA classification
-TRAINING_MODE = True
+TRAINING_MODE = False
 
 scripts = {
     "GUI": "gui.py",
