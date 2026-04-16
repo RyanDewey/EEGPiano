@@ -148,16 +148,38 @@ def preprocess(epoch, sfreq, line_freq, bandpass, resample_hz):
 
 # Setting constants for the batches
 
-buffer = 3 # Seconds FIDDLE WITH THIS FOR TESTING PURPOSES!!!!!!!
+# Buffer must be at least as long as the model's analysis window.
+# If buffer < WIN_SEC, numpy silently returns fewer samples than the model
+# expects, which corrupts the spatial filter correlation without any error.
+buffer = max(WIN_SEC + 1, 4)  # always at least WIN_SEC + 1 second of headroom
 buffer_len = int(buffer * sfreq)
 window_len = int(WIN_SEC * sfreq)
 
-# Creates an array of shape 8 x buffer_len that's all zeroes
+assert buffer_len >= window_len, (
+    f"Buffer ({buffer}s = {buffer_len} samples) must be >= "
+    f"WIN_SEC ({WIN_SEC}s = {window_len} samples). Increase buffer."
+)
 
-batch = np.zeros((n_channels, buffer_len), dtype=np.float64) 
+# Predict every STRIDE_SAMPLES new samples instead of every STRIDE_SEC wall
+# seconds. LSL delivers data in irregular bursts, so wall-clock timing fires
+# before/after the expected sample count — sample-count stride is exact.
+STRIDE_SAMPLES = int(round(STRIDE_SEC * sfreq))
+
+# Artifact rejection: after z-scoring, skip epochs where any channel has
+# peak-to-peak > AMP_THRESHOLD std-devs. Matches offline windowize() behaviour.
+AMP_THRESHOLD = 10.0
+
+# Only push a prediction when the margin between the top-2 fused scores
+# exceeds this fraction. Prevents noisy, low-confidence predictions from
+# triggering wrong piano notes.
+CONFIDENCE_THRESHOLD = 0.10   # tune based on live performance
+
+# Creates an array of shape n_channels x buffer_len that's all zeroes
+
+batch = np.zeros((n_channels, buffer_len), dtype=np.float64)
 
 samples_seen = 0
-last_predict_time = time.time()
+last_predict_sample = 0
 
 # Now, time for the rolling windows
 
@@ -194,35 +216,76 @@ while True:
         batch[:, :-new_samples] = batch[:, new_samples:] # Shifts current contents of the buffer to the left
         batch[:, -new_samples:] = new_data # Fills empty space in buffer with new data
 
-    now = time.time()
+    # Predict every STRIDE_SAMPLES new samples (sample-count stride, not wall clock)
 
-    if now - last_predict_time >= STRIDE_SEC:
-        last_predict_time = now
+    if samples_seen - last_predict_sample < STRIDE_SAMPLES:
+        continue
 
-        # Don't make a new prediction until enough samples exist
+    last_predict_sample = samples_seen
 
-        if samples_seen < window_len:
-            continue
+    # Don't make a new prediction until enough samples exist
 
-        # Extract the newest window
+    if samples_seen < window_len:
+        continue
 
-        epoch = batch[:, -window_len:]
+    # Extract the newest window
 
-        # Preprocess extracted window
+    epoch = batch[:, -window_len:]
 
-        epoch, epoch_sfreq = preprocess(
-            epoch,
-            sfreq=sfreq,
-            line_freq=LINE_FREQ,
-            bandpass=BANDPASS,
-            resample_hz=RESAMPLE_HZ,
-        )
+    # Preprocess extracted window (average ref, notch, bandpass, resample)
 
-        # Run the model on the epoch
+    epoch, epoch_sfreq = preprocess(
+        epoch,
+        sfreq=sfreq,
+        line_freq=LINE_FREQ,
+        bandpass=BANDPASS,
+        resample_hz=RESAMPLE_HZ,
+    )
 
-        predicted_class, fused_scores = model.predict(epoch)
-        predicted_frequency = freq_map[predicted_class]
-        print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}")\
-        
-        # ── Push prediction over LSL ──────────────────────────────────────
-        pred_outlet.push_sample([float(predicted_frequency)])
+    # Remove linear trend per channel to match offline training.
+    # The FBTRCA templates were built from detrended epochs in the notebook's
+    # windowize() function — skipping this step causes a systematic mismatch
+    # between the template and the live epoch that degrades spatial filter scores.
+
+    epoch = signal.detrend(epoch, axis=-1, type="linear")
+
+    # Per-channel z-score to match offline training.
+    # Templates were built from z-scored epochs. Without this, raw amplitude
+    # differences dominate the correlation, causing the spatial filter (w) —
+    # which was optimised for z-scored data — to weight channels incorrectly.
+    # Higher SSVEP frequencies are most affected because their raw amplitudes
+    # are naturally smaller (~1/f), so the mismatch is proportionally larger.
+
+    std = epoch.std(axis=-1, keepdims=True) + 1e-12
+    epoch = epoch / std
+
+    # Artifact rejection: skip epoch if any channel has a large peak-to-peak.
+    # Matches the amp_threshold rejection in the notebook's windowize() function.
+    # Blinks, jaw clenches, and eye movements produce large bursts that score
+    # randomly and push wrong predictions through to the piano.
+
+    ptp = epoch.max(axis=-1) - epoch.min(axis=-1)
+    if np.any(ptp > AMP_THRESHOLD):
+        print("[Pipeline] Epoch rejected — artifact detected, skipping prediction")
+        continue
+
+    # Run the model on the epoch
+
+    predicted_class, fused_scores = model.predict(epoch)
+    predicted_frequency = freq_map[predicted_class]
+
+    # Only push if the classifier is confident.
+    # When fused scores are near-equal the model is uncertain — forcing a
+    # prediction at that point triggers the wrong piano note with high probability.
+
+    sorted_scores = np.sort(fused_scores)[::-1]
+    margin = (sorted_scores[0] - sorted_scores[1]) / (sorted_scores[0] + sorted_scores[1] + 1e-12)
+
+    if margin < CONFIDENCE_THRESHOLD:
+        print(f"[Pipeline] Low confidence ({margin:.3f} < {CONFIDENCE_THRESHOLD}) — skipping prediction")
+        continue
+
+    print(f"Predicted class: {predicted_class}, frequency: {predicted_frequency}, confidence margin: {margin:.3f}")
+
+    # ── Push prediction over LSL ──────────────────────────────────────
+    pred_outlet.push_sample([float(predicted_frequency)])

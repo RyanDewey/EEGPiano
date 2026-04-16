@@ -6,6 +6,7 @@
 
 import numpy as np
 from scipy import signal
+from scipy.linalg import eigh as scipy_eigh
 
 # Returns frequency from class
 
@@ -51,9 +52,15 @@ def trca_fit(X_class, reg=1e-6):
     S = Z @ Z.T - Q
 
     Q = Q + reg * np.eye(n_ch)
-    A = np.linalg.solve(Q, S)
-    eigvals, eigvecs = np.linalg.eig(A) # Linear algebra :(
-    w = np.real(eigvecs[:, np.argmax(np.real(eigvals))])
+
+    # Solve the generalized eigenvalue problem S w = λ Q w directly.
+    # scipy_eigh handles symmetric matrices → guaranteed real eigenvalues in
+    # ascending order, so we take the last eigenvector (largest eigenvalue).
+    # This replaces the previous np.linalg.eig(Q⁻¹S) approach which produced
+    # complex eigenvectors due to numerical asymmetry and required a np.real()
+    # hack that silently degraded the spatial filter quality.
+    _, eigvecs = scipy_eigh(S, Q)
+    w = eigvecs[:, -1]
     w = w / (np.linalg.norm(w) + 1e-12)
     return w, template
 
