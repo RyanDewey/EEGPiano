@@ -208,7 +208,7 @@ while True:
 
         epoch = batch[:, -window_len:]
 
-        # Preprocess extracted window
+        # Preprocess extracted window (average ref, notch, bandpass, resample)
 
         epoch, epoch_sfreq = preprocess(
             epoch,
@@ -217,6 +217,13 @@ while True:
             bandpass=BANDPASS,
             resample_hz=RESAMPLE_HZ,
         )
+
+        # Remove linear trend per channel (matches offline windowize)
+        epoch = signal.detrend(epoch, axis=-1, type="linear")
+
+        # Per-channel normalization (matches offline windowize)
+        std = epoch.std(axis=-1, keepdims=True) + 1e-12
+        epoch = epoch / std
 
         # Run the model on the epoch
 
