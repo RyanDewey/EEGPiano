@@ -33,8 +33,8 @@ FULLSCREEN    = False   # flip to True for actual experiments
 TARGET_FPS    = 240     # high loop rate → accurate phase computation
 
 FREQUENCIES   = [6, 7.5, 10, 12, 15, 20]           # Hz
-NOTE_NAMES    = ['C3', 'E3', 'G3', 'C4', 'E4', 'G4']
-NOTE_MIDI     = [48,   52,   55,   60,   64,   67]  # MIDI 60 = C4
+NOTE_NAMES    = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4']
+NOTE_MIDI     = [60,   62,   64,   65,   67,  69] # MIDI 60 = C4
 
 # Per-frequency accent colours (borders / piano highlights / labels)
 FREQ_COLORS = [
@@ -161,8 +161,8 @@ class Piano:
             w   = max(1, int(self.wkw))
             mid = wk['midi']
             col = self.highlights.get(mid, (235, 235, 235))
-            pygame.draw.rect(surface, col,        (x, self.rect.y, w + 1, int(self.wkh)))
-            pygame.draw.rect(surface, (50, 50, 50), (x, self.rect.y, w + 1, int(self.wkh)), 1)
+            pygame.draw.rect(surface, col,          (x, self.rect.y, w + 1, int(self.wkh)), border_top_left_radius=6, border_top_right_radius=6)
+            pygame.draw.rect(surface, (50, 50, 50), (x, self.rect.y, w + 1, int(self.wkh)), 1, border_top_left_radius=6, border_top_right_radius=6)
             # Label every C
             if mid % 12 == 0:
                 octave = mid // 12 - 1
@@ -178,7 +178,7 @@ class Piano:
             w   = max(1, int(self.bkw))
             mid = bk['midi']
             col = self.highlights.get(mid, (25, 25, 25))
-            pygame.draw.rect(surface, col, (x, self.rect.y, w, int(self.bkh)))
+            pygame.draw.rect(surface, col, (x, self.rect.y, w, int(self.bkh)), border_bottom_left_radius=4, border_bottom_right_radius=4)
 
 
 # ─── Piano sound ────────────────────────────────────────────────────────────────────
@@ -307,6 +307,7 @@ def main():
     target_idx   = -1         # index into FREQUENCIES / NOTE_NAMES (-1 = none)
     prev_phases  = [0] * len(FREQUENCIES)
     t0           = time.perf_counter()
+    key_press_time = -1
 
     while True:
         now = time.perf_counter() - t0
@@ -317,7 +318,14 @@ def main():
                 pygame.quit()
                 sys.exit()
 
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                clicked_note = _get_clicked_key(mx, my, piano)
+                if clicked_note is not None:
+                    print(f'[Mouse] Key clicked: {clicked_note}')
+
             if event.type == pygame.KEYDOWN:
+
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     pygame.quit()
                     sys.exit()
@@ -342,15 +350,13 @@ def main():
                 for i, k in enumerate(num_keys):
                     if event.key == k:
                         note_sounds[i].play()
-                        if target_idx == i:
-                            target_idx = -1
-                            print('[GUI] Target cleared')
-                        else:
-                            target_idx = i
-                            freq       = FREQUENCIES[i]
-                            mv         = float(MARKER_TARGET_BASE + freq)
-                            marker_outlet.push_sample([mv])
-                            print(f'[GUI] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
+                        key_press_time = time.perf_counter()
+                        target_idx = i
+                        key_press_time = time.perf_counter()
+                        freq       = FREQUENCIES[i]
+                        mv         = float(MARKER_TARGET_BASE + freq)
+                        marker_outlet.push_sample([mv])
+                        print(f'[GUI] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
 
         # ── Compute phases & send onset markers ───────────────────────────
         phases = []
@@ -373,6 +379,7 @@ def main():
                 if predicted_freq in FREQUENCIES:
                     pred_idx = FREQUENCIES.index(predicted_freq)
                     note_sounds[pred_idx].play()
+                    key_press_time = time.perf_counter()
                     target_idx = pred_idx   # highlight the predicted key
                     print(f'[GUI] {predicted_freq} Hz → {NOTE_NAMES[pred_idx]}')
 
@@ -385,7 +392,12 @@ def main():
         screen.fill(BG_COLOR)
 
         # Piano highlights: always show frequency colour on target keys
-        piano.highlights = {NOTE_MIDI[i]: FREQ_COLORS[i] for i in range(len(FREQUENCIES))}
+        recently_played = (time.perf_counter() - key_press_time) < 0.3
+        piano.highlights = {
+            NOTE_MIDI[i]: tuple(max(0, c - 60) for c in FREQ_COLORS[i])
+            if i == target_idx and recently_played else FREQ_COLORS[i]
+            for i in range(len(FREQUENCIES))
+        }
         piano.draw(screen, font_sm)
 
         # Connector lines: diagonal from stimulus bottom-centre → piano key top
@@ -476,6 +488,39 @@ def _draw_checkerboard_idle(surface, rect):
             col = (70, 70, 80) if (r + c) % 2 == 0 else (45, 45, 55)
             pygame.draw.rect(surface, col, (px, py, pw, ph))
 
+
+def _get_clicked_key(mx: int, my: int, piano: Piano) -> str | None:
+    """
+    Returns the note name (e.g. 'C4') of the piano key at pixel (mx, my),
+    or None if the click is outside the keyboard.
+    """
+    if not piano.rect.collidepoint(mx, my):
+        return None
+
+    # Check black keys first — they sit on top of white keys
+    for bk in piano.black_keys:
+        x = int(bk['x'])
+        w = max(1, int(piano.bkw))
+        h = int(piano.bkh)
+        if x <= mx <= x + w and piano.rect.y <= my <= piano.rect.y + h:
+            return _midi_to_name(bk['midi'])
+
+    # Then check white keys
+    for wk in piano.white_keys:
+        x = int(wk['x'])
+        w = max(1, int(piano.wkw))
+        if x <= mx <= x + w:
+            return _midi_to_name(wk['midi'])
+
+    return None
+
+
+def _midi_to_name(midi: int) -> str:
+    """Converts a MIDI number to a note name like 'C4'."""
+    note_names = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                  'F#', 'G', 'G#', 'A', 'A#', 'B']
+    octave = (midi // 12) - 1
+    return f'{note_names[midi % 12]}{octave}'
 
 if __name__ == '__main__':
     main()
