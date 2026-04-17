@@ -10,28 +10,17 @@ import sys
 TRAINING_MODE = True
 
 scripts = {
+    "TRAIN": "train.py",
     "GUI": "gui.py",
     "LSL": "unicornlsl.py",
-    "EMG": "EMG_live.py", 
+    "EMG": "EMG_live.py",
 }
-if not TRAINING_MODE:
-    scripts["MODEL"] = "live_pipeline.py"
 
 def stream_output(process, name):
     for line in process.stdout:
         print(f"[{name}] {line}", end="")
 
 processes = {}
-
-for name, script in scripts.items():
-    p = subprocess.Popen(
-        ["python", "-u", script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-    processes[name] = p
-    threading.Thread(target=stream_output, args=(p, name), daemon=True).start()
 
 def shutdown(signum=None, frame=None):
     print("\n[start] shutting down...")
@@ -64,6 +53,33 @@ def shutdown(signum=None, frame=None):
 
     print("[start] all done")
     sys.exit(0)
+
+for name, script in scripts.items():
+    p = subprocess.Popen(
+        ["python", "-u", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+    processes[name] = p
+    threading.Thread(target=stream_output, args=(p, name), daemon=True).start()
+
+if not TRAINING_MODE:
+    print("[start] waiting for TRAIN to finish before starting live_pipeline.py...")
+    train_proc = processes["TRAIN"]
+    train_proc.wait()
+    if train_proc.returncode != 0:
+        print(f"[start] TRAIN exited with code {train_proc.returncode}, skipping live_pipeline.py")
+        shutdown()
+    print("[start] TRAIN done — starting live_pipeline.py")
+    p = subprocess.Popen(
+        ["python", "-u", "live_pipeline.py"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+    processes["MODEL"] = p
+    threading.Thread(target=stream_output, args=(p, "MODEL"), daemon=True).start()
 
 signal.signal(signal.SIGINT, shutdown)
 signal.signal(signal.SIGTERM, shutdown)

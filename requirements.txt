@@ -2,4 +2,5 @@ numpy==2.4.4
 pygame==2.6.1
 pylsl==1.18.1
 pyserial==3.5
+pyxdf==1.17.4
 scipy==1.17.1
