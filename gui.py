@@ -225,6 +225,12 @@ def _build_piano_sound(midi_note: int, duration: float = 1.0,
     return pygame.sndarray.make_sound(stereo)
 
 
+def _get_sound(midi: int, cache: dict) -> pygame.mixer.Sound:
+    if midi not in cache:
+        cache[midi] = _build_piano_sound(midi)
+    return cache[midi]
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -233,7 +239,7 @@ def main():
     # ── Audio ──────────────────────────────────────────────────────────────
     pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
     print('[Audio] Pre-building piano note sounds …')
-    note_sounds = [_build_piano_sound(m) for m in NOTE_MIDI]
+    note_sounds: dict[int, pygame.mixer.Sound] = {}  # midi → Sound, built on demand
     print('[Audio] Ready.')
 
     flags = pygame.FULLSCREEN if FULLSCREEN else 0
@@ -303,11 +309,13 @@ def main():
     ]
 
     # ── Application state ─────────────────────────────────────────────────
-    running_stim = False
-    target_idx   = -1         # index into FREQUENCIES / NOTE_NAMES (-1 = none)
-    prev_phases  = [0] * len(FREQUENCIES)
-    t0           = time.perf_counter()
+    running_stim   = False
+    target_idx     = -1
+    prev_phases    = [0] * len(FREQUENCIES)
+    t0             = time.perf_counter()
     key_press_time = -1
+    selected_midi  = -1                    # ← add
+    key_freq_map: dict[int, list[int]] = {}  # freq_index → [midi, midi] (up to 2 keys)
 
     while True:
         now = time.perf_counter() - t0
@@ -320,12 +328,62 @@ def main():
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
-                clicked_note = _get_clicked_key(mx, my, piano)
-                if clicked_note is not None:
-                    print(f'[Mouse] Key clicked: {clicked_note}')
+
+                # Check if a stimulus box was clicked
+                clicked_stim = None
+                for i, rect in enumerate(stim_rects):
+                    if rect.collidepoint(mx, my):
+                        clicked_stim = i
+                        break
+
+                if clicked_stim is not None and selected_midi != -1:
+                    keys = key_freq_map.get(clicked_stim, [])
+                    if selected_midi in keys:
+                        # Already assigned, do nothing
+                        print(f'[GUI] {_midi_to_name(selected_midi)} already assigned to {FREQUENCIES[clicked_stim]} Hz')
+                    elif len(keys) < 2:
+                        keys.append(selected_midi)
+                        key_freq_map[clicked_stim] = sorted(keys, key=lambda m: piano.key_center_x(m))
+                        print(f'[GUI] Assigned {_midi_to_name(selected_midi)} to {FREQUENCIES[clicked_stim]} Hz')
+                    else:
+                        print(f'[GUI] {FREQUENCIES[clicked_stim]} Hz already has 2 keys — press 0 to reset')
+                    selected_midi = -1
+
+                elif clicked_stim is not None and selected_midi == -1:
+                    print('[GUI] Click a piano key first, then a frequency box to assign it')
+
+                else:
+                    # Check if a piano key was clicked
+                    clicked_note = _get_clicked_key(mx, my, piano)
+                    if clicked_note is not None:
+                        # Find the midi number
+                        clicked_midi = -1
+                        for wk in piano.white_keys:
+                            if _midi_to_name(wk['midi']) == clicked_note:
+                                clicked_midi = wk['midi']
+                                break
+                        for bk in piano.black_keys:
+                            if _midi_to_name(bk['midi']) == clicked_note:
+                                clicked_midi = bk['midi']
+                                break
+
+                        if clicked_midi != -1:
+                            # Check if this midi is assigned to any frequency
+                            assigned_freq = None
+                            for freq_idx, keys in key_freq_map.items():
+                                if clicked_midi in keys:
+                                    assigned_freq = freq_idx
+                                    break
+                            if assigned_freq is not None:
+                                _get_sound(clicked_midi, note_sounds).play()
+                                key_press_time = time.perf_counter()
+                                target_idx = assigned_freq
+                                print(f'[Mouse] Played: {clicked_note}')
+                            else:
+                                selected_midi = clicked_midi
+                                print(f'[Mouse] Selected: {clicked_note} — now click a frequency box')
 
             if event.type == pygame.KEYDOWN:
-
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     pygame.quit()
                     sys.exit()
@@ -333,30 +391,45 @@ def main():
                 if event.key == pygame.K_SPACE:
                     running_stim = not running_stim
                     if running_stim:
-                        t0           = time.perf_counter()
-                        now          = 0.0
-                        prev_phases  = [0] * len(FREQUENCIES)
+                        t0          = time.perf_counter()
+                        now         = 0.0
+                        prev_phases = [0] * len(FREQUENCIES)
                         marker_outlet.push_sample([float(MARKER_EXP_START)])
                         print(f'[GUI] {MARKER_EXP_START} → Experiment START')
                     else:
                         marker_outlet.push_sample([float(MARKER_EXP_STOP)])
                         print(f'[GUI] {MARKER_EXP_STOP} → Experiment STOP')
 
-                # Keys 1–6 select/deselect target
+                if event.key == pygame.K_0:
+                    key_freq_map = {}
+                    selected_midi = -1
+                    print('[GUI] All key assignments cleared')
+
                 num_keys = [
                     pygame.K_1, pygame.K_2, pygame.K_3,
                     pygame.K_4, pygame.K_5, pygame.K_6,
                 ]
                 for i, k in enumerate(num_keys):
                     if event.key == k:
-                        note_sounds[i].play()
-                        key_press_time = time.perf_counter()
-                        target_idx = i
-                        key_press_time = time.perf_counter()
-                        freq       = FREQUENCIES[i]
-                        mv         = float(MARKER_TARGET_BASE + freq)
-                        marker_outlet.push_sample([mv])
-                        print(f'[GUI] {mv} → Target cue: {freq} Hz ({NOTE_NAMES[i]})')
+                        if selected_midi != -1:
+                            keys = key_freq_map.get(i, [])
+                            if selected_midi in keys:
+                                print(f'[GUI] {_midi_to_name(selected_midi)} already assigned to {FREQUENCIES[i]} Hz')
+                            elif len(keys) < 2:
+                                keys.append(selected_midi)
+                                key_freq_map[i] = sorted(keys, key=lambda m: piano.key_center_x(m))
+                                print(f'[GUI] Assigned {_midi_to_name(selected_midi)} to {FREQUENCIES[i]} Hz')
+                            else:
+                                print(f'[GUI] {FREQUENCIES[i]} Hz already has 2 keys — press 0 to reset')
+                            selected_midi = -1
+                        else:
+                            # Play both keys for this frequency
+                            keys = key_freq_map.get(i, [])
+                            for midi in keys:
+                                _get_sound(midi, note_sounds).play()
+                            if keys:
+                                key_press_time = time.perf_counter()
+                                target_idx = i
 
         # ── Compute phases & send onset markers ───────────────────────────
         phases = []
@@ -373,39 +446,64 @@ def main():
 
         # ── Poll for incoming predictions ─────────────────────────────────
         if pred_inlet is not None:
-            sample, _ = pred_inlet.pull_sample(timeout=0.0)  # non-blocking
+            sample, _ = pred_inlet.pull_sample(timeout=0.0)
             if sample is not None:
                 predicted_freq = sample[0]
                 if predicted_freq in FREQUENCIES:
                     pred_idx = FREQUENCIES.index(predicted_freq)
-                    note_sounds[pred_idx].play()
-                    key_press_time = time.perf_counter()
-                    target_idx = pred_idx   # highlight the predicted key
-                    print(f'[GUI] {predicted_freq} Hz → {NOTE_NAMES[pred_idx]}')
+                    keys = key_freq_map.get(pred_idx, [])
+                    if keys:
+                        target_idx = pred_idx   # just highlight, wait for EMG
+                        print(f'[GUI] Predicted: {predicted_freq} Hz — waiting for EMG clench')
 
         # ── Poll EMG navigation ───────────────────────────────────────────────────
         if emg_inlet is not None:
             emg_sample, _ = emg_inlet.pull_sample(timeout=0.0)
-            # EMG input currently disabled
+            if emg_sample is not None:
+                emg_val = emg_sample[0]
+                if emg_val != 0.0:
+                    # Find which frequency is currently targeted
+                    if target_idx >= 0:
+                        keys = key_freq_map.get(target_idx, [])
+                        # keys are sorted left→right, so index 0 = left, 1 = right
+                        if emg_val == -1.0 and len(keys) >= 1:
+                            midi = keys[0]   # left clench → left key
+                            _get_sound(midi, note_sounds).play()
+                            key_press_time = time.perf_counter()
+                            print(f'[EMG] Left clench → {_midi_to_name(midi)}')
+                        elif emg_val == 1.0 and len(keys) >= 2:
+                            midi = keys[1]   # right clench → right key
+                            _get_sound(midi, note_sounds).play()
+                            key_press_time = time.perf_counter()
+                            print(f'[EMG] Right clench → {_midi_to_name(midi)}')
         
         # ── Draw ─────────────────────────────────────────────────────────
         screen.fill(BG_COLOR)
 
         # Piano highlights: always show frequency colour on target keys
         recently_played = (time.perf_counter() - key_press_time) < 0.3
-        piano.highlights = {
-            NOTE_MIDI[i]: tuple(max(0, c - 60) for c in FREQ_COLORS[i])
-            if i == target_idx and recently_played else FREQ_COLORS[i]
-            for i in range(len(FREQUENCIES))
-        }
+        piano.highlights = {}
+        for freq_idx, keys in key_freq_map.items():
+            for midi in keys:
+                color = FREQ_COLORS[freq_idx]
+                if freq_idx == target_idx and recently_played:
+                    color = tuple(max(0, c - 60) for c in color)
+                piano.highlights[midi] = color
+        if selected_midi != -1:
+            if selected_midi % 12 in WHITE_SEMITONES:
+                piano.highlights[selected_midi] = (255, 255, 255)  # white key → white
+            else:
+                piano.highlights[selected_midi] = (90, 90, 90)     # black key → dark gray
         piano.draw(screen, font_sm)
 
         # Connector lines: diagonal from stimulus bottom-centre → piano key top
-        for i, cx in enumerate(stim_cx):
-            line_col    = tuple(max(0, c - 80) for c in FREQ_COLORS[i])
+        for freq_idx, keys in key_freq_map.items():
+            cx = stim_cx[freq_idx]
+            line_col = tuple(max(0, c - 80) for c in FREQ_COLORS[freq_idx])
             stim_bottom = stim_cy + STIM_PX // 2 + BORDER_PX + 2
-            pygame.draw.line(screen, line_col,
-                             (cx, stim_bottom), (key_cx[i], piano_rect.y), 2)
+            for midi in keys:
+                kx = int(piano.key_center_x(midi))
+                pygame.draw.line(screen, line_col, (cx, stim_bottom), (kx, piano_rect.y), 2)
 
         # Stimuli
         for i, rect in enumerate(stim_rects):
@@ -438,8 +536,13 @@ def main():
                 rect.y - freq_txt.get_height() - 4,
             ))
 
-            # Note name below stimulus
-            note_txt = font_md.render(NOTE_NAMES[i], True, TEXT_COLOR)
+            # Note names below stimulus — show assigned keys if any
+            assigned_keys = key_freq_map.get(i, [])
+            if assigned_keys:
+                note_label = ' / '.join(_midi_to_name(m) for m in assigned_keys)
+            else:
+                note_label = '—'
+            note_txt = font_md.render(note_label, True, TEXT_COLOR)
             screen.blit(note_txt, (
                 rect.centerx - note_txt.get_width() // 2,
                 rect.bottom + 6,
@@ -454,17 +557,18 @@ def main():
         screen.blit(s_left, (16, STATUS_H // 2 - s_left.get_height() // 2))
 
         if target_idx >= 0:
-            t_str = f'Target: {FREQUENCIES[target_idx]} Hz  ({NOTE_NAMES[target_idx]})'
+            keys = key_freq_map.get(target_idx, [])
+            note_str = ' / '.join(_midi_to_name(m) for m in keys) if keys else '—'
+            t_str = f'Target: {FREQUENCIES[target_idx]} Hz  ({note_str})'
             t_col = FREQ_COLORS[target_idx]
         else:
-            t_str = 'Target: none   (press 1–6 to select)'
+            t_str = 'Target: none'
             t_col = DIM_COLOR
         s_mid = font_md.render(t_str, True, t_col)
         screen.blit(s_mid, (SCREEN_W // 2 - s_mid.get_width() // 2,
                              STATUS_H // 2 - s_mid.get_height() // 2))
 
-        s_right = font_sm.render('SPACE = start/stop   1–6 = target   ESC = quit',
-                                  True, DIM_COLOR)
+        s_right = font_sm.render('SPACE = start/stop   click key → click box to assign   0 = reset   ESC = quit', True, DIM_COLOR)
         screen.blit(s_right, (SCREEN_W - s_right.get_width() - 14,
                                STATUS_H // 2 - s_right.get_height() // 2))
 
