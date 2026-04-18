@@ -314,6 +314,7 @@ def main():
     prev_phases    = [0] * len(FREQUENCIES)
     t0             = time.perf_counter()
     key_press_time = -1
+    last_played_midi = -1
     selected_midi  = -1                    # ← add
     key_freq_map: dict[int, list[int]] = {}  # freq_index → [midi, midi] (up to 2 keys)
 
@@ -377,6 +378,7 @@ def main():
                             if assigned_freq is not None:
                                 _get_sound(clicked_midi, note_sounds).play()
                                 key_press_time = time.perf_counter()
+                                last_played_midi = clicked_midi 
                                 target_idx = assigned_freq
                                 print(f'[Mouse] Played: {clicked_note}')
                             else:
@@ -429,6 +431,7 @@ def main():
                                 _get_sound(midi, note_sounds).play()
                             if keys:
                                 key_press_time = time.perf_counter()
+                                last_played_midi = keys[0] if len(keys) == 1 else -1
                                 target_idx = i
 
         # ── Compute phases & send onset markers ───────────────────────────
@@ -454,6 +457,8 @@ def main():
                     keys = key_freq_map.get(pred_idx, [])
                     if keys:
                         target_idx = pred_idx   # just highlight, wait for EMG
+                        last_played_midi = -1    # ← clear so no key darkens on prediction alone
+                        key_press_time = -1      # ← clear so recently_played is False
                         print(f'[GUI] Predicted: {predicted_freq} Hz — waiting for EMG clench')
 
         # ── Poll EMG navigation ───────────────────────────────────────────────────
@@ -470,11 +475,13 @@ def main():
                             midi = keys[0]   # left clench → left key
                             _get_sound(midi, note_sounds).play()
                             key_press_time = time.perf_counter()
+                            last_played_midi = midi  
                             print(f'[EMG] Left clench → {_midi_to_name(midi)}')
                         elif emg_val == 1.0 and len(keys) >= 2:
                             midi = keys[1]   # right clench → right key
                             _get_sound(midi, note_sounds).play()
                             key_press_time = time.perf_counter()
+                            last_played_midi = midi  
                             print(f'[EMG] Right clench → {_midi_to_name(midi)}')
         
         # ── Draw ─────────────────────────────────────────────────────────
@@ -486,8 +493,11 @@ def main():
         for freq_idx, keys in key_freq_map.items():
             for midi in keys:
                 color = FREQ_COLORS[freq_idx]
-                if freq_idx == target_idx and recently_played:
-                    color = tuple(max(0, c - 60) for c in color)
+                if recently_played:
+                    if last_played_midi == midi:
+                        color = tuple(max(0, c - 60) for c in color)
+                    elif last_played_midi == -1 and freq_idx == target_idx:
+                        color = tuple(max(0, c - 60) for c in color)
                 piano.highlights[midi] = color
         if selected_midi != -1:
             if selected_midi % 12 in WHITE_SEMITONES:
