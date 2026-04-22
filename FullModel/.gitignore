@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# EEG data files (large — store separately)
+newGuiData/
+EMG_Data/
+*.xdf
+
+# Notebooks checkpoints
+.ipynb_checkpoints/

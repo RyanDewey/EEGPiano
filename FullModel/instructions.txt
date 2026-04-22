@@ -1,0 +1,218 @@
+EEGPiano — Full Model
+Instructions for Use
+=========================================================
+
+OVERVIEW
+--------
+Three operating modes, all launched from start.py:
+
+  TRAIN  – Displays 7.5 / 10 / 12 Hz SSVEP stimuli. Use Lab Recorder
+           alongside to capture EEG + marker streams to .xdf files.
+           Run this to collect calibration data for retraining.
+
+  TEST   – Automated 60-second accuracy test (6 trials × 10 s).
+           Each trial cues one frequency; live_pipeline.py scores
+           every FBTRCA prediction and prints per-frequency accuracy
+           at the end. No Lab Recorder needed.
+
+  RUN    – Interactive piano mode. Click a piano key, then click a
+           frequency box to assign it. SPACE starts the stimulus.
+           EEG prediction selects the active frequency; left/right
+           EMG clench plays the assigned note.
+
+Files
+-----
+  start.py            Entry point — set MODE and MODEL_FILE here
+  gui.py              Unified GUI (TRAIN / TEST / RUN)
+  live_pipeline.py    Real-time FBTRCA classifier (TEST / RUN)
+  EMG_live.py         Live EMG inference → LSL outlet "EMGControl"
+  train.py            Retrain the FBTRCA model from .xdf files
+  unicornlsl.py       Streams EEG from Unicorn Hybrid Black to LSL
+  fbtrca_model.py     FBTRCA algorithm (shared by train + pipeline)
+  fbtrca_model_751012.pkl   Trained model (7.5 / 10 / 12 Hz)
+  newGuiData/         Training .xdf files (freq encoded in filename)
+
+
+HARDWARE REQUIREMENTS
+---------------------
+  • gTec Unicorn Hybrid Black EEG headset
+  • macOS computer (tested); Windows / Linux should work
+  • Monitor refresh rate ≥ 60 Hz (≥ 120 Hz recommended)
+  • Bluetooth connection to headset
+
+
+VIEWING CONDITIONS
+------------------
+  • Viewing distance:  60–80 cm from screen
+  • Room lighting:     dim to reduce reflections
+  • Eye level:         screen centre near eye level
+  • Fixation:          stare directly at the target stimulus
+  • CAUTION:           individuals with photosensitive epilepsy
+                       must NOT use this system
+
+
+SOFTWARE SETUP (one time)
+--------------------------
+1. Install blueutil (macOS — manages Bluetooth automatically):
+
+       brew install blueutil
+
+2. Create and activate a virtual environment:
+
+       python3 -m venv .venv
+       source .venv/bin/activate        # macOS / Linux
+       .venv\Scripts\activate           # Windows
+
+3. Install dependencies:
+
+       pip install -r requirements.txt
+
+4. (TRAIN mode only) Install Lab Recorder:
+       https://github.com/labstreaminglayer/App-LabRecorder/releases
+
+
+HEADSET SETUP
+-------------
+1. Power on the Unicorn Hybrid Black.
+2. Open System Settings → Bluetooth and pair the headset once.
+   After pairing it will show "not connected" — this is expected.
+   Do NOT unpair; unpairing destroys the serial port profile.
+3. unicornlsl.py handles connect/disconnect automatically via blueutil.
+
+
+QUICK START
+-----------
+1. Open start.py and set:
+
+       MODE       = "TEST"                    # or "TRAIN" / "RUN"
+       MODEL_FILE = "fbtrca_model_751012.pkl"
+
+2. Run:
+
+       python start.py
+
+3. Wait for:
+
+       [unicornlsl] streaming
+       [GUI] Marker outlet "SSVEPMarkers" ready.
+
+   (Bluetooth reset takes ~10–15 seconds on first launch.)
+
+
+TRAIN MODE — collecting new calibration data
+--------------------------------------------
+1. Set MODE = "TRAIN" in start.py and run it.
+2. Open Lab Recorder, click Update — you should see:
+     • Unicorn   (EEG, 16 ch, 250 Hz)
+     • SSVEPMarkers  (Markers, 1 ch, irregular)
+3. Tick both streams.
+4. Name the file with the frequency in the name, e.g.:
+       7.5hz_run-001_eeg.xdf
+       10hz_run-001_eeg.xdf
+       12hz_run-001_eeg.xdf
+   The filename is how train.py knows which class each file belongs to.
+5. Click Start in Lab Recorder.
+6. In the stimulus window, press SPACE to start flickering.
+   Focus on the correct stimulus for 30–60 seconds.
+7. Press SPACE to stop, then Stop in Lab Recorder.
+8. Move the saved .xdf file into FullModel/newGuiData/.
+9. Repeat for each frequency (collect ≥ 3 runs per frequency).
+
+To retrain the model after collecting new data:
+
+       python train.py --validate
+
+The --validate flag runs leave-one-file-out cross-validation first
+so you can check accuracy before overwriting the pkl.
+
+
+TEST MODE — live accuracy measurement
+--------------------------------------
+1. Set MODE = "TEST" in start.py.
+2. Run: python start.py
+3. Press SPACE in the GUI to start the 6-trial session.
+   Each trial shows "▼ LOOK HERE ▼" above the target frequency.
+4. Accuracy stats print in the terminal after each trial and at
+   the end of the full session.
+
+
+RUN MODE — playing piano
+-------------------------
+1. Set MODE = "RUN" in start.py.
+2. Run: python start.py
+3. In the GUI:
+     a. Click a piano key to select it (it highlights white/gray).
+     b. Click a frequency box to assign the key to that frequency.
+        Each frequency can have up to 2 keys (left and right clench).
+     c. Press 0 to clear all assignments and start over.
+4. Press SPACE to start the SSVEP stimulus.
+5. Focus on the desired frequency — live_pipeline.py will classify
+   your EEG and highlight that frequency's keys on the piano.
+6. Clench left or right hand to play the assigned note.
+
+
+LSL MARKER ENCODING
+--------------------
+  Value         Meaning
+  ──────────    ──────────────────────────────────────
+  7.5           Stimulus cycle onset — 7.5 Hz
+  10            Stimulus cycle onset — 10 Hz
+  12            Stimulus cycle onset — 12 Hz
+  107.5         Target cue: attend to 7.5 Hz  (TRAIN/TEST)
+  110.0         Target cue: attend to 10 Hz
+  112.0         Target cue: attend to 12 Hz
+  252           Experiment start (SPACE pressed)
+  253           Experiment stop  (SPACE pressed)
+  255           Session complete (TEST mode)
+
+
+TROUBLESHOOTING
+---------------
+  "No module named pyxdf"
+      → pip install pyxdf
+
+  "No module named pygame"
+      → pip install pygame
+
+  "cannot connect to serial port"
+      → Unicorn is powered on and paired via Bluetooth.
+        Verify HEADSET_MAC in unicornlsl.py matches your device.
+        Find it: blueutil --paired
+
+  Streams not visible in Lab Recorder
+      → Firewall may be blocking LSL multicast (UDP 16571, 16572).
+        Run both scripts on the same machine.
+
+  live_pipeline crashes immediately
+      → Check terminal for the full traceback.
+        Most likely: wrong MODEL_FILE path in start.py, or pkl
+        was trained on different frequencies than the GUI expects.
+
+  Low accuracy in TEST mode
+      → Ensure electrode impedance < 10 kΩ; re-wet gel if needed.
+        Sit still; minimise jaw/neck muscle movement.
+        Try retraining: python train.py --validate
+        Check monitor refresh rate matches stimulus frequencies:
+            system_profiler SPDisplaysDataType | grep "Refresh Rate"
+        At 60 Hz all three frequencies (7.5 / 10 / 12 Hz) are exact.
+
+  EMG not triggering notes
+      → EMG_live.py trains on startup from EMG_Data/.
+        Verify ../EMG_Data/ contains EMG_1.csv and the raw BrainFlow CSV.
+        Adjust LEFT_THRESHOLD / RIGHT_THRESHOLD in EMG_live.py if
+        clenches are not being detected or rest is triggering.
+
+
+NOTE ON MONITOR REFRESH RATE
+------------------------------
+Stimulus phase is computed via time.perf_counter(), so timing is
+accurate regardless of display refresh rate. However actual photons
+are quantised to the monitor's frame period.
+
+  At 60 Hz (16.7 ms/frame):   7.5 Hz = 8 frames, 10 Hz = 6 frames,
+                                12 Hz = 5 frames — all exact.
+  At 120 Hz (8.3 ms/frame):   all three are exact sub-multiples.
+  At 240 Hz (4.2 ms/frame):   all exact.
+
+All three target frequencies divide evenly into 60 Hz, so a standard
+60 Hz monitor is sufficient for clean SSVEP stimulation.
