@@ -368,11 +368,12 @@ while True:
 
         # 5. Detrend
         epoch = signal.detrend(epoch, axis=-1, type='linear')
-        # 6. Artifact rejection — must be BEFORE normalization (values are in µV here)
+        # 6. Artifact rejection — must be BEFORE normalization (values are in µV here).
+        # Do NOT set last_clench_t here: artifact rejection fires on normal high-amplitude
+        # windows too, and feeding into the clench gate would permanently suppress predictions.
         ptp = epoch.max(axis=-1) - epoch.min(axis=-1)
-        if np.any(ptp > 100.0):
-            print(f'[MODEL] artifact rejected — clench/artifact (max ptp={ptp.max():.1f} µV)')
-            last_clench_t = time.time()
+        if np.any(ptp > 200.0):
+            print(f'[MODEL] artifact rejected (max ptp={ptp.max():.1f} µV)')
             continue
         # 7. Per-channel normalize
         std   = epoch.std(axis=-1, keepdims=True) + 1e-12
