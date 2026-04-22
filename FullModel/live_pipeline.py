@@ -20,7 +20,10 @@ from collections import defaultdict
 
 import numpy as np
 from scipy import signal
-from pylsl import StreamInlet, StreamInfo, StreamOutlet, resolve_byprop
+from pylsl import StreamInlet, StreamInfo, StreamOutlet, resolve_byprop, resolve_streams
+
+# ── EEG source name — must match unicornlsl.py's lsl_name ────────────────────
+EEG_STREAM_NAME = 'Unicorn'
 
 from fbtrca_model import FBTRCA, class_to_freq_map
 
@@ -65,13 +68,34 @@ else:
     else:
         print('[MODEL] No marker stream — running without stimulus gating.')
 
-# ── EEG stream ────────────────────────────────────────────────────────────────
-print('[MODEL] Waiting for EEG stream...')
+# ── Enumerate all visible LSL streams (diagnostic) ───────────────────────────
+def _log_streams():
+    found = resolve_streams(wait_time=1.0)
+    print('[MODEL] ── Visible LSL streams ──────────────────────────────')
+    for s in found:
+        print(f'[MODEL]   name={s.name()!r:25s} type={s.type()!r:12s} '
+              f'ch={s.channel_count():3d}  fs={s.nominal_srate():.0f} Hz')
+    print('[MODEL] ────────────────────────────────────────────────────')
+
+_log_streams()
+
+# ── EEG stream — connect by name to avoid grabbing OpenBCI/BrainFlow ─────────
+print(f'[MODEL] Waiting for EEG stream (name={EEG_STREAM_NAME!r})...')
 while True:
-    es = resolve_byprop('type', 'EEG', timeout=2)
+    es = resolve_byprop('name', EEG_STREAM_NAME, timeout=2)
+    if not es:
+        # Fallback: take any EEG-type stream that isn't the EMG board
+        all_eeg = resolve_byprop('type', 'EEG', timeout=2)
+        es = [s for s in (all_eeg or []) if s.name() != 'BrainFlow']
+        if es:
+            print(f'[MODEL] WARNING: {EEG_STREAM_NAME!r} not found — '
+                  f'falling back to {es[0].name()!r}. '
+                  f'Set EEG_STREAM_NAME to match your headset LSL name.')
     if es:
         eeg = StreamInlet(es[0])
-        print('[MODEL] Connected to EEG stream.')
+        info = es[0]
+        print(f'[MODEL] Connected to EEG stream: name={info.name()!r}  '
+              f'ch={info.channel_count()}  fs={info.nominal_srate():.0f} Hz')
         break
     print('[MODEL] No EEG stream yet, retrying...')
     time.sleep(1)
@@ -344,14 +368,15 @@ while True:
 
         # 5. Detrend
         epoch = signal.detrend(epoch, axis=-1, type='linear')
-        # 6. Per-channel normalize
-        std   = epoch.std(axis=-1, keepdims=True) + 1e-12
-        epoch = epoch / std
-        # 7. Artifact rejection
+        # 6. Artifact rejection — must be BEFORE normalization (values are in µV here)
         ptp = epoch.max(axis=-1) - epoch.min(axis=-1)
         if np.any(ptp > 100.0):
-            print(f'[MODEL] artifact rejected (max ptp={ptp.max():.1f})')
+            print(f'[MODEL] artifact rejected — clench/artifact (max ptp={ptp.max():.1f} µV)')
+            last_clench_t = time.time()
             continue
+        # 7. Per-channel normalize
+        std   = epoch.std(axis=-1, keepdims=True) + 1e-12
+        epoch = epoch / std
 
         # During calibration: collect labeled window, don't predict
         if in_calibration:

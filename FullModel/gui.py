@@ -537,6 +537,24 @@ def main():
                         selected_midi = -1
                         print('[GUI] All chord assignments cleared')
 
+                    # ← / → — simulate left/right EMG clench on current target
+                    if event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                        if target_idx >= 0:
+                            side      = 0 if event.key == pygame.K_LEFT else 1
+                            side_name = 'Left' if side == 0 else 'Right'
+                            midis     = chord_map.get((target_idx, side), [])
+                            if midis:
+                                for midi in midis:
+                                    _get_sound(midi, note_sounds).play()
+                                key_press_time = time.perf_counter()
+                                names = '+'.join(_midi_to_name(m) for m in midis)
+                                print(f'[SIM-EMG] {side_name} clench → {names}')
+                            else:
+                                print(f'[SIM-EMG] {side_name} clench — no notes assigned '
+                                      f'to {FREQUENCIES[target_idx]} Hz {side_name.lower()}')
+                        else:
+                            print('[SIM-EMG] no target predicted yet — look at a stimulus first')
+
                     # 1–6 — simulate EEG prediction + EMG clench
                     # 1=7.5Hz left, 2=7.5Hz right, 3=10Hz left,
                     # 4=10Hz right, 5=12Hz left, 6=12Hz right
@@ -983,7 +1001,7 @@ def main():
                                   bar_mid_y - mid_txt.get_height() // 2))
 
             right_txt = font_sm.render(
-                'C=calibrate  SPACE=start/stop  select key → click=left clench  Shift+click=right clench  0=reset  ESC=quit',
+                'C=calibrate  SPACE=start/stop  ←=left clench  →=right clench  select key → click=left  Shift+click=right  0=reset  ESC=quit',
                 True, DIM_COLOR)
             screen.blit(right_txt, (SCREEN_W - right_txt.get_width() - 14,
                                     bar_mid_y - right_txt.get_height() // 2))

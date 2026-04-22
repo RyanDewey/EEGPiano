@@ -17,7 +17,13 @@ import threading
 from scipy.signal import butter, filtfilt, iirnotch
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
-from pylsl import StreamInfo, StreamOutlet, StreamInlet, resolve_byprop
+from pylsl import StreamInfo, StreamOutlet, StreamInlet, resolve_byprop, resolve_streams
+
+# ── Stream config ─────────────────────────────────────────────────────────────
+# Name of the EEG headset stream to EXCLUDE when searching for the EMG board.
+# Both Unicorn and OpenBCI/BrainFlow broadcast type='EEG' — we must not
+# accidentally connect the EMG classifier to the EEG headset.
+EEG_HEADSET_NAME = 'Unicorn'
 
 # ── Quit flag ─────────────────────────────────────────────────────────────────
 quit_flag = threading.Event()
@@ -96,30 +102,49 @@ print('[emglive] LSL outlet "EMGControl" ready.')
 
 # ── Connect to EEG/EMG LSL inlet ──────────────────────────────────────────────
 
-print('[emglive] searching for EEG stream...')
-streams = []
-while not streams and not quit_flag.is_set():
-    streams = resolve_byprop('type', 'EEG', timeout=2.0)
-    if not streams:
-        print('[emglive] no stream found, retrying...')
+print('[emglive] searching for EMG/OpenBCI stream (excluding EEG headset)...')
+
+# Log all visible streams so we know what's on the network.
+def _log_streams():
+    found = resolve_streams(wait_time=1.0)
+    print('[emglive] ── Visible LSL streams ──────────────────────────────')
+    for s in found:
+        print(f'[emglive]   name={s.name()!r:25s} type={s.type()!r:12s} '
+              f'ch={s.channel_count():3d}  fs={s.nominal_srate():.0f} Hz')
+    print('[emglive] ────────────────────────────────────────────────────')
+
+_log_streams()
+
+chosen = None
+while chosen is None and not quit_flag.is_set():
+    # Prefer BrainFlow/OpenBCI by name so we never accidentally grab the EEG headset.
+    candidates = resolve_byprop('name', 'BrainFlow', timeout=2.0)
+    if not candidates:
+        all_eeg = resolve_byprop('type', 'EEG', timeout=2.0) or []
+        candidates = [s for s in all_eeg if s.name() != EEG_HEADSET_NAME]
+    if candidates:
+        chosen = candidates[0]
+    else:
+        print('[emglive] no EMG/OpenBCI stream found, retrying...')
         time.sleep(0.5)
 
 if quit_flag.is_set():
     raise SystemExit(0)
 
-inlet = StreamInlet(streams[0])
-print(f'[emglive] connected to: {streams[0].name()}')
+inlet = StreamInlet(chosen)
+print(f'[emglive] connected to: name={chosen.name()!r}  '
+      f'ch={chosen.channel_count()}  fs={chosen.nominal_srate():.0f} Hz')
 
 # ── Filter helpers ────────────────────────────────────────────────────────────
 
-fs = 250
+LIVE_FS = chosen.nominal_srate() or 250  # actual sample rate from the OpenBCI stream
 
 def highpass(x, cutoff=20):
-    b, a = butter(4, cutoff / (fs / 2), btype='highpass')
+    b, a = butter(4, cutoff / (LIVE_FS / 2), btype='highpass')
     return filtfilt(b, a, x)
 
 def notch(x, f0=60):
-    b, a = iirnotch(f0 / (fs / 2), 30)
+    b, a = iirnotch(f0 / (LIVE_FS / 2), 30)
     return filtfilt(b, a, x)
 
 def extract_features(sig):
@@ -133,7 +158,7 @@ def extract_features(sig):
 
 # ── Live inference loop ───────────────────────────────────────────────────────
 
-chunk_size  = int(fs * 0.5)
+chunk_size  = int(LIVE_FS * 0.5)
 buffer_ch1  = collections.deque()
 buffer_ch2  = collections.deque()
 last_output = 0          # debounce: only push when value changes
