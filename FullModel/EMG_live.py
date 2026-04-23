@@ -96,12 +96,13 @@ print('[emglive] LSL outlet "EMGControl" ready.')
 
 # ── Connect to EEG/EMG LSL inlet ──────────────────────────────────────────────
 
-print('[emglive] searching for EEG stream...')
+print('[emglive] searching for EMG stream...')
 streams = []
 while not streams and not quit_flag.is_set():
-    streams = resolve_byprop('type', 'EEG', timeout=2.0)
+    found = resolve_byprop('type', 'EEG', timeout=2.0)
+    streams = [s for s in found if s.name() != 'Unicorn']
     if not streams:
-        print('[emglive] no stream found, retrying...')
+        print('[emglive] no EMG stream found, retrying...')
         time.sleep(0.5)
 
 if quit_flag.is_set():
