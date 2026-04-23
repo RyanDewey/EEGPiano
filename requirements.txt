@@ -12,6 +12,7 @@ pygame==2.6.1
 pylsl==1.18.1
 pyparsing==3.3.2
 pyserial==3.5
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"  # auto 120 Hz via CoreGraphics
 python-dateutil==2.9.0.post0
 pytz==2026.1.post1
 scikit-learn==1.8.0

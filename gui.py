@@ -26,7 +26,11 @@ from pylsl import StreamInfo, StreamOutlet
 SCREEN_W   = 1440
 SCREEN_H   = 900
 FULLSCREEN = False
-TARGET_FPS = 240
+# Match TARGET_FPS to the monitor's actual refresh rate.
+# At 60 Hz the 12 Hz stimulus half-cycle is 2.5 frames → alternates 2/3/2/3,
+# creating temporal jitter that degrades the 12 Hz SSVEP response.
+# At 120 Hz every trained frequency divides evenly (7.5→8, 10→6, 12→5 frames).
+TARGET_FPS = 120
 
 # ─── Stimulus config ──────────────────────────────────────────────────────────
 
@@ -164,10 +168,87 @@ def make_trial_sequence():
     return pool
 
 
+def _set_display_hz(target_hz: int = 120) -> bool:
+    """
+    Switch the macOS main display to target_hz using CoreGraphics (Quartz).
+
+    Only changes the refresh rate — resolution and scaling are preserved.
+    Requires: pip install pyobjc-framework-Quartz
+
+    Returns True if the mode was applied, False if unavailable or unsupported.
+    On failure, set the rate manually:
+        System Settings → Displays → Refresh Rate → 120 Hz
+    """
+    try:
+        from Quartz import (
+            CGMainDisplayID,
+            CGDisplayCopyAllDisplayModes,
+            CGDisplayModeGetRefreshRate,
+            CGDisplayPixelsWide,
+            CGDisplayPixelsHigh,
+            CGDisplayModeGetWidth,
+            CGDisplayModeGetHeight,
+            CGBeginDisplayConfiguration,
+            CGConfigureDisplayWithDisplayMode,
+            CGCompleteDisplayConfiguration,
+            kCGConfigureForSession,
+        )
+    except ImportError:
+        return False
+
+    display_id = CGMainDisplayID()
+    cur_w      = CGDisplayPixelsWide(display_id)
+    cur_h      = CGDisplayPixelsHigh(display_id)
+
+    modes = CGDisplayCopyAllDisplayModes(display_id, None)
+    if not modes:
+        return False
+
+    # Find a mode that matches the current resolution at the target Hz.
+    # Iterating all modes guards against selecting a lower-res 120 Hz mode.
+    target_mode = None
+    for mode in modes:
+        hz = CGDisplayModeGetRefreshRate(mode)
+        w  = CGDisplayModeGetWidth(mode)
+        h  = CGDisplayModeGetHeight(mode)
+        if abs(hz - target_hz) < 1.0 and w == cur_w and h == cur_h:
+            target_mode = mode
+            break
+
+    if target_mode is None:
+        return False
+
+    err, config = CGBeginDisplayConfiguration()
+    if err != 0:
+        return False
+
+    CGConfigureDisplayWithDisplayMode(config, display_id, target_mode, None)
+    CGCompleteDisplayConfiguration(config, kCGConfigureForSession)
+    return True
+
+
 def main():
+    # ── Refresh rate setup ────────────────────────────────────────────────────
+    # Try to switch the macOS display to 120 Hz via CoreGraphics before pygame
+    # initialises so that vsync=1 below locks to the correct boundary.
+    if sys.platform == 'darwin':
+        ok = _set_display_hz(TARGET_FPS)
+        if ok:
+            print(f'[Display] Switched to {TARGET_FPS} Hz via CoreGraphics.')
+        else:
+            print(f'[Display] Could not auto-set {TARGET_FPS} Hz.')
+            print( '[Display] → pip install pyobjc-framework-Quartz  (for automatic switching)')
+            print( '[Display] → or: System Settings → Displays → Refresh Rate → 120 Hz')
+
     pygame.init()
+
+    # vsync=1 locks pygame.display.flip() to the monitor's actual refresh
+    # boundary. Without it, the loop renders at TARGET_FPS but the GPU
+    # presents frames whenever it likes, causing tearing and imprecise
+    # stimulus timing. With vsync=1 each flip waits for the next vblank.
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H),
-                                     pygame.FULLSCREEN if FULLSCREEN else 0)
+                                     pygame.FULLSCREEN if FULLSCREEN else 0,
+                                     vsync=1)
     pygame.display.set_caption('SSVEP Accuracy Test')
     clock = pygame.time.Clock()
 
@@ -236,8 +317,24 @@ def main():
         marker_outlet.push_sample([float(MARKER_EXP_STOP)])
 
     # ── Main loop ─────────────────────────────────────────────────────────────
+    fps_check_done  = False
+    fps_check_after = time.perf_counter() + 3.0   # check actual FPS after 3 s warmup
+
     while True:
         now_abs = time.perf_counter()
+
+        # Warn once if the display isn't actually running at TARGET_FPS.
+        # A reading well below TARGET_FPS means vsync locked to the OS
+        # refresh rate (still at 60 Hz) — fix in System Settings or install
+        # pyobjc-framework-Quartz for automatic switching.
+        if not fps_check_done and now_abs >= fps_check_after:
+            fps_check_done = True
+            actual_fps = clock.get_fps()
+            if actual_fps < TARGET_FPS * 0.85:
+                print(f'[Display] WARNING: running at {actual_fps:.0f} Hz, '
+                      f'expected {TARGET_FPS} Hz.')
+                print( '[Display] → Display is likely still at 60 Hz.')
+                print( '[Display] → System Settings → Displays → Refresh Rate → 120 Hz')
         elapsed = now_abs - state_t   # seconds in current state
 
         # ── Events ───────────────────────────────────────────────────────────
